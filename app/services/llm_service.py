@@ -5,7 +5,15 @@ from app.context.examples import ESTIMATION_EXAMPLES, format_examples_for_prompt
 
 log = structlog.get_logger()
 
-MAX_TOKENS = 4000
+# deepseek-flash runs in thinking mode by default ("high" effort), and the
+# chain-of-thought is billed as output tokens, so the cap has to cover the
+# reasoning budget *plus* the estimation itself. Too small a cap means generation
+# stops with finish_reason="length" before any answer is written.
+MAX_TOKENS = 16000
+
+# DeepSeek exposes an OpenAI-compatible API, so the OpenAI SDK is reused with
+# only the base URL and credential swapped.
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 
 class LLMServiceError(Exception):
@@ -43,16 +51,15 @@ def generate_estimation(transcription: str) -> dict:
 
     log.info("generating_estimation", provider=settings.LLM_PROVIDER, model=settings.LLM_MODEL)
 
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": transcription},
+    ]
+
     try:
-        if settings.LLM_PROVIDER == "openai":
-            return _call_deepseek(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": transcription},
-                ],
-            )
-        else:
-            return {}
+        if settings.LLM_PROVIDER == "deepseek":
+            return _call_deepseek(messages=messages)
+        raise LLMServiceError(f"Unsupported LLM provider: {settings.LLM_PROVIDER!r}")
     except LLMServiceError:
         raise
     except Exception as exc:
@@ -61,11 +68,11 @@ def generate_estimation(transcription: str) -> dict:
 
 
 def _call_deepseek(messages: list[dict]) -> dict:
-    """Send a chat completion request to the OpenAI API."""
+    """Send a chat completion request to DeepSeek's OpenAI-compatible API."""
     from openai import OpenAI
 
     settings = get_settings()
-    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    client = OpenAI(api_key=settings.llm_api_key, base_url=DEEPSEEK_BASE_URL)
 
     response = client.chat.completions.create(
         model=settings.LLM_MODEL,
@@ -73,18 +80,42 @@ def _call_deepseek(messages: list[dict]) -> dict:
         max_tokens=MAX_TOKENS,
     )
 
+    choice = response.choices[0]
     usage = response.usage
-    log.info(
-        "llm_response_received",
-        provider="openai",
-        input_tokens=usage.prompt_tokens,
-        output_tokens=usage.completion_tokens,
+    finish_reason = choice.finish_reason
+    reasoning_tokens = getattr(
+        getattr(usage, "completion_tokens_details", None), "reasoning_tokens", None
     )
 
+    log.info(
+        "llm_response_received",
+        provider=settings.LLM_PROVIDER,
+        input_tokens=usage.prompt_tokens,
+        output_tokens=usage.completion_tokens,
+        reasoning_tokens=reasoning_tokens,
+        finish_reason=finish_reason,
+    )
+
+    estimation = (choice.message.content or "").strip()
+
+    if finish_reason == "length":
+        raise LLMServiceError(
+            f"DeepSeek stopped at the {MAX_TOKENS}-token output cap before writing the "
+            f"estimation (output_tokens={usage.completion_tokens}, "
+            f"reasoning_tokens={reasoning_tokens}). Raise MAX_TOKENS in "
+            "app/services/llm_service.py."
+        )
+    if finish_reason != "stop" or not estimation:
+        raise LLMServiceError(
+            "DeepSeek returned no usable estimation "
+            f"(finish_reason={finish_reason!r}, output_tokens={usage.completion_tokens}, "
+            f"reasoning_tokens={reasoning_tokens})."
+        )
+
     return {
-        "estimation": response.choices[0].message.content,
+        "estimation": estimation,
         "model": response.model,
-        "provider": "deepseek",
+        "provider": settings.LLM_PROVIDER,
         "usage": {
             "input_tokens": usage.prompt_tokens,
             "output_tokens": usage.completion_tokens,
