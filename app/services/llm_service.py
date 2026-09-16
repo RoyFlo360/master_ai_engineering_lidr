@@ -1,18 +1,18 @@
-import structlog
+from structlog import get_logger
 
 from app.config import get_settings
 from app.context.examples import ESTIMATION_EXAMPLES, format_examples_for_prompt
 
-log = structlog.get_logger()
+log = get_logger()
 
 # deepseek-flash runs in thinking mode by default ("high" effort), and the
 # chain-of-thought is billed as output tokens, so the cap has to cover the
 # reasoning budget *plus* the estimation itself. Too small a cap means generation
 # stops with finish_reason="length" before any answer is written.
-MAX_TOKENS = 16000
+MAX_TOKENS = 8000
 
-# DeepSeek exposes an OpenAI-compatible API, so the OpenAI SDK is reused with
-# only the base URL and credential swapped.
+"""DeepSeek exposes an OpenAI-compatible API, so the OpenAI SDK is reused with
+only the base URL and credential swapped. """
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 
@@ -67,6 +67,19 @@ def generate_estimation(transcription: str) -> dict:
         raise LLMServiceError(f"LLM call failed: {exc}") from exc
 
 
+def cost_llm(input_tokens:float, output_tokens:float, llm_model) -> float:
+    PRICING = {
+        "deepseek-flash": {"input": 0.15, "output": 0.60},
+    }
+    prices = PRICING.get(llm_model, {"input": 0, "output": 0})
+    cost = (
+            (input_tokens / 1_000_000) * prices["input"] +
+            (output_tokens / 1_000_000) * prices["output"]
+    )
+
+    return round(cost, 4)
+
+
 def _call_deepseek(messages: list[dict]) -> dict:
     """Send a chat completion request to DeepSeek's OpenAI-compatible API."""
     from openai import OpenAI
@@ -78,6 +91,11 @@ def _call_deepseek(messages: list[dict]) -> dict:
         model=settings.LLM_MODEL,
         messages=messages,
         max_tokens=MAX_TOKENS,
+        reasoning_effort="low", # low | high | max
+        extra_body={"thinking": {"type": "disabled"}}
+        #max_output_tokens=800,
+        #reasoning={"effort": "medium"},  # ✅ New: controls reasoning depth
+        #text={"verbosity": "low"},  # ✅ New: controls answer length
     )
 
     choice = response.choices[0]
@@ -120,5 +138,6 @@ def _call_deepseek(messages: list[dict]) -> dict:
             "input_tokens": usage.prompt_tokens,
             "output_tokens": usage.completion_tokens,
             "total_tokens": usage.total_tokens,
+            "cost_usd": cost_llm(usage.prompt_tokens, usage.completion_tokens, settings.LLM_MODEL),
         },
     }

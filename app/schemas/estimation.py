@@ -13,6 +13,7 @@ class TokenUsage(BaseModel):
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    cost_usd: float = Field(..., description="LLM cost")
 
 
 class EstimationResponse(BaseModel):

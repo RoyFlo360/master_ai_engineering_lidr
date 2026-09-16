@@ -32,7 +32,7 @@ class Settings(BaseSettings):
         OPENAI_API_KEY slot.
         """
         if self.LLM_PROVIDER == "deepseek":
-            return self.DEEPSEEK_API_KEY or self.OPENAI_API_KEY
+            return self.DEEPSEEK_API_KEY
         if self.LLM_PROVIDER == "anthropic":
             return self.ANTHROPIC_API_KEY
         return None

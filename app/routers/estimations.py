@@ -1,10 +1,10 @@
-import structlog
+from structlog import get_logger
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.estimation import EstimationRequest, EstimationResponse
 from app.services.llm_service import LLMServiceError, generate_estimation
 
-log = structlog.get_logger()
+log = get_logger()
 
 router = APIRouter(prefix="/api/v1", tags=["estimations"])
 
