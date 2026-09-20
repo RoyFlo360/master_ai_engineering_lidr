@@ -23,3 +23,11 @@ class EstimationResponse(BaseModel):
     model: str = Field(..., description="LLM model used")
     provider: str = Field(..., description="LLM provider used")
     usage: TokenUsage
+
+
+class StreamEstimationRequest(BaseModel):
+    """Streaming endpoint request — only the transcription, knobs are not exposed."""
+
+    transcription: str = Field(..., min_length=50, description="Meeting transcription text")
+    model: str | None = Field(default=None, description="Override the default model")
+    max_tokens: int = Field(default=8000, gt=0, le=16000)

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables and .env file."""
 
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8")
-
+    #session 2
     OPENAI_API_KEY: str | None = None
     ANTHROPIC_API_KEY: str | None = None
     DEEPSEEK_API_KEY: str | None = None
@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "deepseek-flash"
     APP_ENV: Literal["development", "staging", "production"] = "development"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "DEBUG"
+    #session 3
+    PRIMARY_MODEL: str = "deepseek/deepseek-flash"
+    FALLBACK_MODEL: str = "claude-haiku-4-5-20251001"
+    LLM_TIMEOUT: int = 30
+    LLM_RETRIES: int = 2
+    REDIS_URL: str = "redis://localhost:6379"
+    CACHE_TTL: int = 86400
+    ESTIMATOR_API_BASE_URL: str = "http://localhost:8000"
 
     @property
     def llm_api_key(self) -> str | None:

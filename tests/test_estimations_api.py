@@ -44,7 +44,7 @@ def test_estimate_returns_a_complete_estimation_response(client, llm):
     assert body["estimation"] == ESTIMATION_TEXT
     assert body["model"] == "deepseek-flash"
     assert body["provider"] == "deepseek"
-    assert set(body["usage"]) == {"input_tokens", "output_tokens", "total_tokens"}
+    assert set(body["usage"]) == {"input_tokens", "output_tokens", "total_tokens", "cost_usd"}
 
 
 def test_estimate_rejects_a_transcription_that_is_too_short(client):
