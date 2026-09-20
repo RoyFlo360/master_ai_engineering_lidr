@@ -1,0 +1,10 @@
+# Keep host state and secrets out of the image.
+.env
+.venv/
+.git/
+.gitignore
+.codewhale/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/

@@ -1,7 +1,8 @@
 from os import getenv
+from json import loads
 from collections.abc import Iterator
 
-from httpx import stream, Timeout, HTTPError, post
+from httpx import stream, Timeout, HTTPError
 import streamlit as st
 
 API_BASE_URL = getenv("ESTIMATOR_API_BASE_URL", "http://localhost:8000")
@@ -18,8 +19,9 @@ st.caption(
 with st.chat_message("assistant"):
     st.write("AI estimation service using Cache Augmented Generation (CAG) architecture 🤖")
 
-def stream_estimation(transcription: str) -> Iterator[str]:
-    """POST to the SSE endpoint and yield text chunks as they arrive.
+
+def stream_estimation(transcription: str) -> Iterator[dict]:
+    """POST to the SSE endpoint and yield each frame as ``{"event", "data"}``.
 
     Per the SSE spec, a single message with internal newlines is serialised as
     multiple ``data:`` lines, and the client must join them with ``\\n`` to
@@ -39,13 +41,9 @@ def stream_estimation(transcription: str) -> Iterator[str]:
         for raw_line in response.iter_lines():
             if raw_line == "":
                 if data_lines:
-                    payload_text = "\n".join(data_lines)
+                    yield {"event": current_event, "data": "\n".join(data_lines)}
                     data_lines = []
-                    if current_event == "token":
-                        yield payload_text
-                    elif current_event == "error":
-                        yield f"\n\n[error] {payload_text}"
-                    elif current_event == "done":
+                    if current_event == "done":
                         return
                 current_event = "token"
                 continue
@@ -59,14 +57,29 @@ def stream_estimation(transcription: str) -> Iterator[str]:
                 )
 
 
+def add_usage(usage: dict) -> None:
+    """Fold one request's token counts and cost into the session totals."""
+    totals = st.session_state.totals
+    totals["input"] += usage["input_tokens"]
+    totals["output"] += usage["output_tokens"]
+    totals["total"] += usage["total_tokens"]
+    totals["cost"] += usage["cost_usd"]
+
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+# Session-scoped accounting: resets when the browser session does.
+if "totals" not in st.session_state:
+    st.session_state.totals = {"input": 0, "output": 0, "total": 0, "cost": 0.0}
+if "last_usage" not in st.session_state:
+    st.session_state.last_usage = {}
+
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-usage_metrics = ""
 
 if prompt := st.chat_input("Paste your meeting transcription here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -77,45 +90,50 @@ if prompt := st.chat_input("Paste your meeting transcription here..."):
         placeholder = st.empty()
         full_response = ""
         try:
-            for chunk in stream_estimation(prompt):
-                full_response += chunk
-                placeholder.markdown(full_response + "▍")
+            for frame in stream_estimation(prompt):
+                if frame["event"] == "token":
+                    full_response += frame["data"]
+                    placeholder.markdown(full_response + "▍")
+                elif frame["event"] == "usage":
+                    st.session_state.last_usage = loads(frame["data"])
+                    add_usage(st.session_state.last_usage)
+                elif frame["event"] == "error":
+                    full_response += f"\n\n[error] {frame['data']}"
             placeholder.markdown(full_response)
         except HTTPError as exc:
             full_response = f"Could not reach the estimator at `{STREAM_ENDPOINT}`: {exc}"
             placeholder.error(full_response)
-        api_response = full_response
-    print("*" * 100)
-    print(api_response)
-    print(type(api_response))
-    print("#" * 100)
-    print(full_response)
-    print(type(full_response))
-    # usage = full_response.get("usage", "No usage data found please check")
-    # input_tokens = usage.get("input_tokens", "No input tokens found")
-    # output_tokens = usage.get("output_tokens", "No output tokens found")
-    # total_tokens = usage.get("total_tokens", "No total tokens found")
-    # cost_usd = usage.get("cost_usd", "No cost_usd found")
-    # usage_metrics = (
-    #     f"### Input tokens = {input_tokens}\n"
-    #     f"### Output tokens = {output_tokens}\n"
-    #     f"### Total tokens used = {total_tokens}\n"
-    #     f"### Cost in USD = ${cost_usd}"
-    # )
 
-    st.session_state.messages.append({"role": "assistant", "content": api_response})
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 
 with st.sidebar:
     st.header("Service")
     st.code(STREAM_ENDPOINT, language="text")
     primary = getenv("PRIMARY_MODEL", "deepseek-flash")
-    fallback =getenv("FALLBACK_MODEL", "claude-haiku-4-5-20251001")
+    fallback = getenv("FALLBACK_MODEL", "claude-haiku-4-5-20251001")
     st.markdown(f"**Primary model:** `{primary}`")
     st.markdown(f"**Fallback model:** `{fallback}`")
     st.markdown(f"**Cache TTL:** `{getenv('CACHE_TTL', '86400')}s`")
+    st.divider()
+    st.header("Usage")
+    totals = st.session_state.totals
+    last = st.session_state.last_usage
+    st.metric("Input tokens", totals["input"], delta=last.get("input_tokens"))
+    st.metric("Output tokens", totals["output"], delta=last.get("output_tokens"))
+    st.metric("Total tokens", totals["total"], delta=last.get("total_tokens"))
+    st.metric(
+        "Cost (USD)",
+        f"${totals['cost']:.4f}",
+        delta=f"${last['cost_usd']:.4f}" if last else None,
+    )
+    st.caption("Session totals. The delta is the last request; a cache hit costs $0.")
 
-    #st.markdown(usage_metrics)
-    if st.button("Clear chat history"):
+    if st.button("Clear chat history", type="primary"):
         st.session_state.messages = []
+        st.session_state.totals = {"input": 0, "output": 0, "total": 0, "cost": 0.0}
+        st.session_state.last_usage = {}
         st.rerun()
+
+
+

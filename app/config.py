@@ -9,6 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # the current working directory the server is started from.
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
+# DeepSeek is the default provider. The model id lives here once so the raw DeepSeek
+# name (LLM_MODEL, which llm_service sends to the DeepSeek API) and the LiteLLM form
+# (PRIMARY_MODEL) cannot drift apart.
+DEEPSEEK_MODEL = "deepseek-flash"
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables and .env file."""
@@ -19,17 +24,22 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str | None = None
     DEEPSEEK_API_KEY: str | None = None
     LLM_PROVIDER: Literal["deepseek", "anthropic"] = "deepseek"
-    LLM_MODEL: str = "deepseek-flash"
+    LLM_MODEL: str = DEEPSEEK_MODEL
     APP_ENV: Literal["development", "staging", "production"] = "development"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "DEBUG"
     #session 3
-    PRIMARY_MODEL: str = "deepseek/deepseek-flash"
+    PRIMARY_MODEL: str = f"deepseek/{DEEPSEEK_MODEL}"
     FALLBACK_MODEL: str = "claude-haiku-4-5-20251001"
     LLM_TIMEOUT: int = 30
     LLM_RETRIES: int = 2
+    # One source of truth for the output cap: the request may override it per call.
+    MAX_OUTPUT_TOKENS: int = 8000
+    # DeepSeek runs in thinking mode by default and bills the chain of thought as
+    # output tokens (measured: 4363 billed against 1812 characters of answer).
+    # Off by default to keep estimations cheap; set true to get the reasoning back.
+    ENABLE_THINKING: bool = False
     REDIS_URL: str = "redis://localhost:6379"
     CACHE_TTL: int = 86400
-    ESTIMATOR_API_BASE_URL: str = "http://localhost:8000"
 
     @property
     def llm_api_key(self) -> str | None:
@@ -40,7 +50,7 @@ class Settings(BaseSettings):
         OPENAI_API_KEY slot.
         """
         if self.LLM_PROVIDER == "deepseek":
-            return self.DEEPSEEK_API_KEY
+            return self.DEEPSEEK_API_KEY or self.OPENAI_API_KEY
         if self.LLM_PROVIDER == "anthropic":
             return self.ANTHROPIC_API_KEY
         return None

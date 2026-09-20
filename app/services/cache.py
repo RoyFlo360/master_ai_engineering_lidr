@@ -50,7 +50,9 @@ class EstimationCache:
             sort_keys=True,
         )
         digest = sha256(payload.encode("utf-8")).hexdigest()
-        return f"estimation:{digest}"
+        # Versioned: bump when the cached payload shape changes, otherwise entries
+        # written by an older build are read back with the old shape.
+        return f"estimation:v2:{digest}"
 
     def get(self, key: str) -> dict[str, Any] | None:
         try:

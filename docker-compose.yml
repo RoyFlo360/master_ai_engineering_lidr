@@ -1,0 +1,60 @@
+# The whole stack: Redis, the API and the Streamlit client.
+#
+#   docker compose up --build      # build and start everything
+#   docker compose logs -f api     # follow the API
+#   docker compose down            # stop it
+#
+# `.:/srv/app` bind-mounts the source into both containers, so edits to Python
+# files apply live: uvicorn reloads the API, Streamlit re-runs the page on save.
+# Changes to pyproject.toml, uv.lock or the Dockerfile need `--build`.
+#
+# Host ports are overridable, defaulting to the usual ones:
+#   API_PORT=8001 STREAMLIT_PORT=8502 docker compose up
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    # --reload-dir keeps the watcher off the bind-mounted .venv and .git.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
+    environment:
+      REDIS_URL: redis://redis:6379
+      # Windows bind mounts do not emit inotify events, so poll for changes.
+      WATCHFILES_FORCE_POLLING: "true"
+    env_file:
+      - .env
+    volumes:
+      - .:/srv/app
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  streamlit:
+    build: .
+    command: streamlit run streamlit_app.py
+    environment:
+      ESTIMATOR_API_BASE_URL: http://api:8000
+      # Set through the environment rather than CLI flags: Streamlit's config
+      # precedence reads these, so `streamlit config show` can confirm them.
+      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+      STREAMLIT_SERVER_PORT: "8501"
+      STREAMLIT_SERVER_RUN_ON_SAVE: "true"
+      # Windows bind mounts do not emit inotify events, so poll for changes.
+      STREAMLIT_SERVER_FILE_WATCHER_TYPE: poll
+    volumes:
+      - .:/srv/app
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    depends_on:
+      - api

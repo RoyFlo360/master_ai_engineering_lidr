@@ -45,6 +45,7 @@ def test_generate_estimation_returns_estimation_with_metadata_and_usage(llm):
         "input_tokens": 2063,
         "output_tokens": 812,
         "total_tokens": 2875,
+        "cost_usd": 0.0008,
     }
 
 

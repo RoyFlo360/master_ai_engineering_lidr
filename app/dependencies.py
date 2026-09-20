@@ -26,5 +26,7 @@ def get_llm_wrapper() -> LLMWrapper:
         fallback_model=settings.FALLBACK_MODEL,
         timeout=settings.LLM_TIMEOUT,
         num_retries=settings.LLM_RETRIES,
+        max_tokens=settings.MAX_OUTPUT_TOKENS,
+        enable_thinking=settings.ENABLE_THINKING,
         cache=get_cache(),
     )

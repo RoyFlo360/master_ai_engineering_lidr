@@ -43,16 +43,18 @@ async def create_estimation_stream(
 
     async def event_generator() -> AsyncIterator[dict]:
         loop = get_running_loop()
-        chunks = wrapper.complete_stream(
+        # The wrapper already yields wire-ready events, including the final usage
+        # frame that carries token counts and cost to the client.
+        events = wrapper.complete_stream(
             system_prompt=system_prompt,
             user_message=request.transcription,
             model_override=request.model,
-            max_tokens=request.max_tokens,
+            max_tokens=request.max_tokens or wrapper.max_tokens,
         )
 
-        def _next_chunk() -> str | None:
+        def _next_event() -> dict | None:
             try:
-                return next(chunks)
+                return next(events)
             except StopIteration:
                 return None
             except Exception as exc:  # noqa: BLE001 — surface as SSE error event
@@ -61,11 +63,10 @@ async def create_estimation_stream(
 
         try:
             while True:
-                chunk = await loop.run_in_executor(None, _next_chunk)
-                if chunk is None:
+                event = await loop.run_in_executor(None, _next_event)
+                if event is None:
                     break
-                if chunk:
-                    yield {"event": "token", "data": chunk}
+                yield event
             yield {"event": "done", "data": "[DONE]"}
         except Exception as exc:  # noqa: BLE001
             yield {"event": "error", "data": str(exc)}

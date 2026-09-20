@@ -26,8 +26,17 @@ class EstimationResponse(BaseModel):
 
 
 class StreamEstimationRequest(BaseModel):
-    """Streaming endpoint request — only the transcription, knobs are not exposed."""
+    """Streaming endpoint request.
+
+    ``usage`` deliberately has no field here: token counts and cost are produced by
+    the LLM call, so they belong in the response, never in the request.
+    """
 
     transcription: str = Field(..., min_length=50, description="Meeting transcription text")
     model: str | None = Field(default=None, description="Override the default model")
-    max_tokens: int = Field(default=8000, gt=0, le=16000)
+    max_tokens: int | None = Field(
+        default=None,
+        gt=0,
+        le=16000,
+        description="Output cap; omit to use the service default",
+    )
