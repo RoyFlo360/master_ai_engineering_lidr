@@ -5,14 +5,24 @@ from structlog import get_logger
 from fastapi import APIRouter, HTTPException, Depends
 from sse_starlette.sse import EventSourceResponse
 
-from app.dependencies import get_llm_wrapper
-from app.services.llm_wrapper import LLMWrapper
-from app.schemas.estimation_schema import EstimationRequest, EstimationResponse, StreamEstimationRequest
+from app.dependencies import get_llm_wrapper, get_usage_ledger
+from app.prompts.loader import render_estimation_prompt
+from app.services.llm_wrapper import LLMWrapper, _usage_from_result
+from app.services.usage_ledger import UsageLedger
+from app.schemas.estimation_schema import (
+    EstimationRequest, EstimationResponse, StreamEstimationRequest, TokenUsage,
+)
+from app.schemas.new_estimation_schema import (
+    EstimationRequest as NewEstimationRequest, EstimationResponse as NewEstimationResponse
+)
+from app.schemas.usage_schema import UsageTotalsResponse
 from app.services.llm_service import LLMServiceError, generate_estimation, build_system_prompt
 
 log = get_logger()
 
 router = APIRouter(prefix="/api/v1", tags=["estimations"])
+
+PROMPT_VERSION = "v1"
 
 
 @router.post("/estimate", response_model=EstimationResponse)
@@ -25,6 +35,60 @@ async def create_estimation(request: EstimationRequest) -> EstimationResponse:
         raise HTTPException(status_code=500, detail=str(exc))
 
     return EstimationResponse(**result)
+
+
+@router.post("/new-estimate", response_model=NewEstimationResponse)
+async def create_new_estimation(
+        request: NewEstimationRequest,
+        wrapper: LLMWrapper = Depends(get_llm_wrapper),
+        ledger: UsageLedger = Depends(get_usage_ledger),
+) -> NewEstimationResponse:
+    """Receive a typed estimation request and return the rendered estimation."""
+    system_prompt, user_message = render_estimation_prompt(request, version=PROMPT_VERSION)
+    log.info(
+        "estimation_request_received",
+        prompt_version=PROMPT_VERSION,
+        project_type=request.project_type.value,
+        detail_level=request.detail_level.value,
+        output_format=request.output_format.value,
+        description_chars=len(request.description),
+    )
+
+    try:
+        result = wrapper.complete(
+            system_prompt=system_prompt,
+            user_message=user_message
+        )
+    except Exception as exc:
+        log.error("estimation_endpoint_error", error=str(exc), error_type=type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Upstream LLM call failed") from exc
+
+    usage = _usage_from_result(result)
+    ledger.record(usage, cache_hit=result["cache_hit"])
+    log.info(
+        "estimation_completed",
+        prompt_version=PROMPT_VERSION,
+        cache_hit=result["cache_hit"],
+        **usage,
+    )
+    return NewEstimationResponse(
+        text=result["estimation"],
+        prompt_version=PROMPT_VERSION,
+        cache_hit=result["cache_hit"],
+        usage=TokenUsage(**usage),
+    )
+
+
+@router.get("/usage", response_model=UsageTotalsResponse)
+async def get_usage_totals(
+    ledger: UsageLedger = Depends(get_usage_ledger),
+) -> UsageTotalsResponse:
+    """Running totals over every call this process has served.
+
+    Process-local: a restart starts them over, and in development so does every
+    uvicorn ``--reload``. Cache hits are counted as calls and add no cost.
+    """
+    return UsageTotalsResponse(**ledger.totals())
 
 
 @router.post("/estimate/stream")

@@ -42,7 +42,7 @@ services:
 
   streamlit:
     build: .
-    command: streamlit run streamlit_app.py
+    command: streamlit run streamlit_app_loader.py
     environment:
       ESTIMATOR_API_BASE_URL: http://api:8000
       # Set through the environment rather than CLI flags: Streamlit's config

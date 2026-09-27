@@ -125,6 +125,102 @@ class LLMWrapper:
     # Public API
     # ------------------------------------------------------------------
 
+
+    def complete(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+        model_override: str | None = None,
+        max_tokens: int = 4000,
+        thinking_budget: int | None = None,
+    ) -> dict[str, Any]:
+        """Single LLM call with cache + (optional) fallback. Returns the legacy dict shape
+        plus ``cache_hit`` and ``cost_usd`` fields.
+        """
+        cache_key_model = model_override or self.primary_model
+        cache_key = EstimationCache.make_key(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            model=cache_key_model,
+            max_tokens=max_tokens,
+            thinking_budget=thinking_budget,
+        )
+        cached = self.cache.get(cache_key)
+        if cached:
+            return {**cached, "cache_hit": True}
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        kwargs = self._build_call_kwargs(
+            messages=messages,
+            max_tokens=max_tokens,
+            thinking_budget=thinking_budget,
+            model_override=model_override,
+        )
+
+        log.info(
+            "llm_call_started",
+            mode="blocking",
+            model=model_override or self.primary_model,
+            has_thinking=thinking_budget is not None,
+        )
+        t0 = time.perf_counter()
+        try:
+            response = self._dispatch(model_override=model_override, **kwargs)
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            log.error(
+                "llm_call_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                latency_ms=latency_ms,
+            )
+            raise
+
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        result = self._normalise_response(response, latency_ms=latency_ms)
+        log.info(
+            "llm_call_completed",
+            model=result["model"],
+            provider=result["provider"],
+            input_tokens=result["usage"]["input_tokens"],
+            output_tokens=result["usage"]["output_tokens"],
+            cost_usd=result["cost_usd"],
+            latency_ms=latency_ms,
+            finish_reason=result["finish_reason"],
+        )
+        self.cache.set(cache_key, result)
+        return {**result, "cache_hit": False}
+
+
+    @staticmethod
+    def _normalise_response(response: Any, *, latency_ms: int) -> dict[str, Any]:
+        choice = response.choices[0]
+        finish_reason = (choice.finish_reason or "stop").lower()
+        usage = response.usage
+        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        total_tokens = getattr(usage, "total_tokens", input_tokens + output_tokens) or (input_tokens + output_tokens)
+
+        model = _normalise_model_name(response.model)
+        return {
+            "estimation": choice.message.content or "",
+            "model": model,
+            "provider": _provider_from_model(model),
+            "finish_reason": finish_reason,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            },
+            "latency_ms": latency_ms,
+            "cost_usd": _estimate_cost(model, input_tokens, output_tokens),
+        }
+
+
     def complete_stream(
         self,
         *,
@@ -289,6 +385,23 @@ def _usage_payload(model: str, usage: Any | None) -> dict[str, Any]:
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
         "cost_usd": _estimate_cost(model, input_tokens, output_tokens),
+    }
+
+
+def _usage_from_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Usage for one finished blocking call, in the shape :func:`_usage_payload` returns.
+
+    A cache hit replays a stored answer: the token counts come from the cached
+    entry, because an identical prompt tokenises identically and they do not
+    change between replays, while ``cost_usd`` is zero — nothing was billed for
+    the replay.
+    """
+    usage = result.get("usage") or {}
+    return {
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+        "cost_usd": 0.0 if result.get("cache_hit") else result.get("cost_usd", 0.0),
     }
 
 

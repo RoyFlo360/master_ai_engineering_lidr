@@ -1,4 +1,4 @@
-"""FastAPI dependency factories for shared singletons (cache and LLM wrapper)."""
+"""FastAPI dependency factories for shared singletons (cache, LLM wrapper, ledger)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from functools import lru_cache
 from app.config import get_settings
 from app.services.cache import EstimationCache
 from app.services.llm_wrapper import LLMWrapper
+from app.services.usage_ledger import UsageLedger
 
 
 @lru_cache
@@ -30,3 +31,9 @@ def get_llm_wrapper() -> LLMWrapper:
         enable_thinking=settings.ENABLE_THINKING,
         cache=get_cache(),
     )
+
+
+@lru_cache
+def get_usage_ledger() -> UsageLedger:
+    """One ledger per process, shared by every request it serves."""
+    return UsageLedger()

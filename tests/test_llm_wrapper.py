@@ -5,7 +5,12 @@ No Redis, no Router, no network — these call the methods directly with a stub.
 
 from types import SimpleNamespace
 
-from app.services.llm_wrapper import LLMWrapper, _estimate_cost, _usage_payload
+from app.services.llm_wrapper import (
+    LLMWrapper,
+    _estimate_cost,
+    _usage_from_result,
+    _usage_payload,
+)
 
 
 class StubWrapper:
@@ -72,3 +77,29 @@ def test_a_cache_hit_reports_zero_and_a_unknown_model_is_never_guessed_at():
         "cost_usd": 0.0,
     }
     assert _estimate_cost("some-unlisted-model", 1000, 1000) == 0.0
+
+
+def test_usage_from_result_keeps_the_tokens_of_a_replay_but_not_its_cost():
+    """The cached counts do not change between replays; the bill does."""
+    result = {
+        "usage": {"input_tokens": 2063, "output_tokens": 812, "total_tokens": 2875},
+        "cost_usd": 0.000797,
+        "cache_hit": True,
+    }
+
+    assert _usage_from_result(result) == {
+        "input_tokens": 2063,
+        "output_tokens": 812,
+        "total_tokens": 2875,
+        "cost_usd": 0.0,
+    }
+
+
+def test_usage_from_result_charges_a_cache_miss_what_the_call_cost():
+    result = {
+        "usage": {"input_tokens": 2063, "output_tokens": 812, "total_tokens": 2875},
+        "cost_usd": 0.000797,
+        "cache_hit": False,
+    }
+
+    assert _usage_from_result(result)["cost_usd"] == 0.000797
