@@ -40,6 +40,17 @@ class Settings(BaseSettings):
     ENABLE_THINKING: bool = False
     REDIS_URL: str = "redis://localhost:6379"
     CACHE_TTL: int = 86400
+    # Session 5 — conversational sessions, attachments, guardrails, semantic cache.
+    MAX_ATTACHMENT_CHARS: int = 20_000
+    MAX_CONVERSATION_TURNS: int = 6
+    METADATA_EXTRACTOR_MODEL: str = "gpt-4o-mini"
+    # Metadata is refreshed heuristically; the LLM extractor only runs when the
+    # heuristic finds no project name/team/technology for the turn.
+    METADATA_LLM_FALLBACK: bool = True
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    SEMANTIC_CACHE_THRESHOLD: float = 0.92
+    SEMANTIC_CACHE_TTL: int = 86400
+    SEMANTIC_CACHE_LOG_ONLY: bool = False
 
     @property
     def llm_api_key(self) -> str | None:
@@ -56,7 +67,7 @@ class Settings(BaseSettings):
         return None
 
     @model_validator(mode="after")
-    def validate_api_key_for_provider(self) -> "Settings":
+    def validate_api_key_for_provider(self) -> Settings:
         """Ensure the API key for the selected LLM provider is present."""
         if not self.llm_api_key:
             raise ValueError(

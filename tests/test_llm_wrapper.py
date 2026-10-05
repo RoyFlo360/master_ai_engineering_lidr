@@ -5,6 +5,9 @@ No Redis, no Router, no network — these call the methods directly with a stub.
 
 from types import SimpleNamespace
 
+import pytest
+
+from app.schemas.new_estimation_schema import EstimationResult
 from app.services.llm_wrapper import (
     LLMWrapper,
     _estimate_cost,
@@ -103,3 +106,130 @@ def test_usage_from_result_charges_a_cache_miss_what_the_call_cost():
     }
 
     assert _usage_from_result(result)["cost_usd"] == 0.000797
+
+
+# --- structured chat: DeepSeek thinking must be off --------------------------
+
+
+class RecordingInstructor:
+    """Captures the kwargs Instructor would forward to litellm."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.sentinel = object()
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.sentinel
+
+
+def build_chat_stub(*, enable_thinking: bool = False) -> LLMWrapper:
+    """A real ``LLMWrapper`` without its ``__init__`` (no Router, no cache)."""
+    stub = object.__new__(LLMWrapper)
+    stub.primary_model = "deepseek/deepseek-flash"
+    stub.openai_api_key = "openai-key"
+    stub.deepseek_api_key = "deepseek-key"
+    stub.anthropic_api_key = "anthropic-key"
+    stub.timeout = 30
+    stub.enable_thinking = enable_thinking
+    stub._instructor = RecordingInstructor()
+    return stub
+
+
+def structured_chat(stub: LLMWrapper, model_override: str | None = None):
+    return LLMWrapper.complete_structured_chat(
+        stub,
+        messages=[{"role": "user", "content": "hi"}],
+        response_model=EstimationResult,
+        model_override=model_override,
+    )
+
+
+def test_structured_chat_disables_deepseek_thinking_by_default():
+    """Regression: Instructor sends ``tool_choice``, and DeepSeek rejects it with
+    "Thinking mode does not support this tool_choice" unless thinking is off."""
+    stub = build_chat_stub(enable_thinking=False)
+
+    structured_chat(stub)
+
+    assert stub._instructor.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_structured_chat_leaves_thinking_on_when_configured():
+    stub = build_chat_stub(enable_thinking=True)
+
+    structured_chat(stub)
+
+    assert "extra_body" not in stub._instructor.calls[0]
+
+
+def test_structured_chat_never_sends_the_deepseek_switch_to_anthropic():
+    stub = build_chat_stub(enable_thinking=False)
+
+    structured_chat(stub, model_override="claude-haiku-4-5-20251001")
+
+    assert "extra_body" not in stub._instructor.calls[0]
+
+
+def test_structured_chat_uses_the_deepseek_key_for_deepseek():
+    stub = build_chat_stub()
+
+    structured_chat(stub)
+
+    assert stub._instructor.calls[0]["api_key"] == "deepseek-key"
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("deepseek/deepseek-flash", "deepseek-key"),
+        ("gpt-4o-mini", "openai-key"),
+        ("claude-haiku-4-5-20251001", "anthropic-key"),
+    ],
+)
+def test_api_key_for_routes_each_provider_to_its_own_key(model, expected):
+    assert build_chat_stub()._api_key_for(model) == expected
+
+
+def test_api_key_for_keeps_the_deepseek_slot_fallback():
+    stub = build_chat_stub()
+    stub.deepseek_api_key = None
+
+    assert stub._api_key_for("deepseek/deepseek-flash") == "openai-key"
+
+
+def test_the_metadata_extractor_targets_openai_with_the_openai_key():
+    """Regression: the gpt-4o-mini fallback was sent the DeepSeek key, which
+    OpenAI rejected as an incorrect API key."""
+    stub = build_chat_stub()
+
+    structured_chat(stub, model_override="gpt-4o-mini")
+
+    assert stub._instructor.calls[0]["api_key"] == "openai-key"
+    assert "extra_body" not in stub._instructor.calls[0]  # OpenAI, not DeepSeek
+
+
+def test_instructor_forwards_the_thinking_switch_to_litellm():
+    """Ends the chain: our kwargs reach ``litellm.completion`` through Instructor."""
+    import instructor
+
+    captured: dict = {}
+
+    def recorder(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capture")
+
+    stub = build_chat_stub(enable_thinking=False)
+    stub._instructor = instructor.from_litellm(recorder)
+
+    with pytest.raises(Exception, match="stop after capture"):
+        LLMWrapper.complete_structured_chat(
+            stub,
+            messages=[{"role": "user", "content": "hi"}],
+            response_model=EstimationResult,
+            max_retries=0,
+        )
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "tool_choice" in captured  # what DeepSeek rejects while thinking is on

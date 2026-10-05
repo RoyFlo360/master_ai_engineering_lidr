@@ -18,40 +18,53 @@ is expected to survive a restart.
 ## Layout
 
 ```
-app/main.py                    FastAPI app, CORS, /health, lifespan
+app/main.py                    FastAPI app, CORS, /health, lifespan; mounts both routers
 app/config.py                  Settings (pydantic-settings, reads root .env)
-app/dependencies.py            lru_cache factories: get_cache, get_llm_wrapper, get_usage_ledger
-app/routers/estimations.py     every HTTP endpoint lives here
-app/schemas/estimation_schema.py      transcription request, TokenUsage, EstimationResponse
-app/schemas/new_estimation_schema.py  typed v1 request/response (EstimationRequest/Response)
+app/dependencies.py            lru_cache factories: get_cache, get_llm_wrapper, get_usage_ledger, get_estimation_service, get_session_store
+app/routers/estimations.py     the transcription + typed-v1 HTTP endpoints
+app/routers/sessions.py        conversational endpoints: POST /sessions, POST /sessions/{id}/estimate, GET /sessions/{id}
+app/schemas/estimation_schema.py      transcription request, TokenUsage, EstimationResponse (legacy shape)
+app/schemas/new_estimation_schema.py  typed v1: EstimationRequest/Response, EstimationResult, StructuredEstimationResponse
 app/schemas/usage_schema.py           UsageTotalsResponse for GET /usage
 app/services/llm_service.py    legacy OpenAI-client path behind /estimate + /estimate/stream
-app/services/llm_wrapper.py    LiteLLM path: Router + fallback, cache, cost, usage shapes
+app/services/llm_wrapper.py    LiteLLM path: Router + fallback, cache, cost, usage shapes, Instructor structured calls
 app/services/cache.py          EstimationCache (Redis, key = sha256 of prompts + knobs)
+app/services/semantic_cache.py vector-similarity cache (redisvl + Redis Stack; no-op without RediSearch)
+app/services/estimation.py     Session-4 pipeline: guardrails → caches → prompt → Instructor → output guardrail
 app/services/usage_ledger.py   process-local running totals
+app/sessions/                  in-memory SessionStore + ConversationHistory/ProjectMetadata, heuristic extractor, LLM extractor fallback
+app/attachments/extractor.py   PDF/DOCX text extraction + transcript enrichment
+app/attachments/upload.py      httpx multipart fields for the Streamlit client
+app/guardrails/input.py        moderation + prompt-injection + PII checks
+app/guardrails/output.py       enforce_scope_response low-confidence filter
 app/context/examples.py        reference examples for the LEGACY flows
 app/prompts/loader.py          Jinja2 loader; prompts live at <use_case>/<version>/<role>.j2
 app/prompts/estimation/v1/     system.j2, user.j2, examples.j2  (the typed v1 flow)
+app/prompts/estimation/v2/     system.j2, user.j2  (conversational; adds <project_metadata>)
+app/prompts/metadata_extraction/v1/  per-turn metadata extractor prompts
 streamlit_app.py               streaming client (SSE) for /estimate/stream
 streamlit_app_estimation_api.py  JSON client for /estimate
-streamlit_app_loader.py        form client for /new-estimate — the one compose runs
+streamlit_app_loader.py        two-tab client: typed /new-estimate + conversational /sessions — the one compose runs
 tests/                         hermetic pytest suite (no network, no .env)
 specs/                         spec-driven decisions, numbered
 ```
 
-## The two estimation flows — do not confuse them
+## The estimation flows — do not confuse them
 
 | Flow | Endpoint(s) | Prompt source | LLM call |
 | --- | --- | --- | --- |
 | Legacy | `POST /api/v1/estimate`, `POST /api/v1/estimate/stream` | `app/services/llm_service.py` + `app/context/examples.py`, built in code | `openai` client directly |
 | Typed v1 | `POST /api/v1/new-estimate` | `render_estimation_prompt(request, version="v1")` → `app/prompts/estimation/v1/*.j2` | `LLMWrapper.complete()` (LiteLLM Router, fallback, cache) |
+| Conversational | `POST /sessions/{id}/estimate` | `render_conversational_prompt(...)` → `app/prompts/estimation/v2/*.j2`; metadata via `app/sessions/heuristics.py` (LLM `metadata_extraction/v1/` only as fallback) | `LLMWrapper.complete_structured_chat()` (Instructor, no cache) |
 
-Only the typed flow uses prompt **versioning**; the version is the string
-`PROMPT_VERSION` in `app/routers/estimations.py`, so switching templates is a
-string change, not a refactor (add `v2/` beside `v1/`).
+The typed and conversational flows use prompt **versioning**; the version is a
+string at the call site (`PROMPT_VERSION = "v1"` in `app/routers/estimations.py`,
+`conversational_prompt_version = "v2"` in `EstimationService`), so switching
+templates is a string change, not a refactor (add `v3/` beside `v2/`).
 
-`docker-compose.yml` runs `streamlit_app_loader.py`, so the typed flow is the one
-you see in the browser; the other two clients are run by hand.
+`docker-compose.yml` runs `streamlit_app_loader.py`, a two-tab client: **Typed
+estimation** (`/new-estimate`) and **Conversational session** (`/sessions`). The
+other two clients are run by hand.
 
 ## Endpoints
 
@@ -59,6 +72,9 @@ you see in the browser; the other two clients are run by hand.
 - `POST /api/v1/estimate/stream` — same body → SSE: `token` frames, one `usage` frame, `done`; errors as an `error` frame
 - `POST /api/v1/new-estimate` — typed body → `{text, prompt_version, cache_hit, usage}`
 - `GET /api/v1/usage` — running totals for this process
+- `POST /sessions` — create a session → `{session_id}`
+- `POST /sessions/{session_id}/estimate` — multipart form (transcript + optional PDF/DOCX) → `StructuredEstimationResponse`
+- `GET /sessions/{session_id}` — session metadata + history length
 - `GET /health`, `GET /docs`
 
 ## Run and verify
@@ -84,6 +100,11 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
   every successful call (spec 004). FastAPI validates the returned object against it.
 - **Usage has one shape**: `{input_tokens, output_tokens, total_tokens, cost_usd}`
   (`TokenUsage`). Token counts and cost are always *responses*, never request fields.
+- **Free text and structured answers are different schemas.** `EstimationResponse`
+  (`{text, prompt_version, cache_hit, usage}`) is the `/new-estimate` free-text reply;
+  `StructuredEstimationResponse` (`{result, prompt_version, cache_hit}`) carries the
+  validated `EstimationResult`. Never add a required field to one to serve the other
+  flow — that is exactly what broke `/new-estimate` (spec 007).
 - **Prompt versioning**: templates on disk under `app/prompts/<use_case>/<version>/`,
   rendered by `render_estimation_prompt`; never f-string a prompt together.
 - **Schemas in `app/schemas/`, side effects in `app/services/`, HTTP in `app/routers/`.**
@@ -136,3 +157,34 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
    reaches Redis, and the graceful-degradation path has never been exercised at all —
    and `LLMWrapper.complete_stream`, since the endpoint tests inject a fake wrapper.
    Both are written down in specs 003 and 002. Change either and you verify by hand.
+10. **Sessions are process-local** (`app/dependencies.get_session_store`, an
+    `lru_cache`d `SessionStore`). An API restart wipes them and a second uvicorn worker
+    forks them. Only `/sessions/*` touches the store.
+11. **The semantic cache needs Redis Stack, not vanilla `redis:7-alpine`.**
+    `EstimationSemanticCache` checks `module_list()` for RediSearch and sets
+    `available = False` when it is absent (or Redis is unreachable), turning
+    `lookup`/`store` into no-ops. The dependency does that check **before** building
+    the OpenAI vectorizer (which probes the embedding model at construction), so a
+    vanilla Redis fails fast instead of blocking the first request on the network.
+    Compose ships vanilla Redis, so the stack runs without a semantic cache — by
+    design, not by accident.
+12. **`EstimationService.estimate` is not wired to a route.** `/new-estimate` calls
+    `LLMWrapper.complete()` directly, so the Session-4 cached pipeline is only reached
+    from tests. Wire it or delete it — spec 007 lists it as a follow-up.
+13. **Metadata refresh is a heuristic first, an LLM call only as fallback.**
+    `app/sessions/heuristics.py` extracts the project name/team/tech/scope with no
+    billed call; the narrow LLM extractor in `app/sessions/metadata_extractor.py`
+    runs only when the heuristic finds no structured facts for the turn (disable with
+    `METADATA_LLM_FALLBACK=false`). The system prompt is never stored in history —
+    `ConversationHistory.to_messages(system_prompt=…)` regenerates and prepends it.
+14. **DeepSeek structured calls must force thinking off.** Instructor sends
+    `tool_choice`, and DeepSeek rejects it while thinking is on ("Thinking mode does
+    not support this tool_choice"). `_thinking_off_extra_body` centralises the
+    switch; both the text (`_build_call_kwargs`) and structured
+    (`complete_structured_chat`) paths use it. Forgetting it on a new call path is a
+    502 with `InstructorRetryException`.
+15. **One API key per provider; model overrides use their own.** `_api_key_for`
+    routes `gpt-*`/`o1`/`o3` to `OPENAI_API_KEY`, `claude*` to `ANTHROPIC_API_KEY`,
+    and `deepseek*` to `DEEPSEEK_API_KEY` (falling back to the OpenAI slot). Sending
+    the DeepSeek key to an OpenAI model is an auth error, not a fallback — the
+    `gpt-4o-mini` metadata extractor did exactly that once.

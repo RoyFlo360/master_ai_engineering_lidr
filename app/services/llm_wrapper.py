@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any, TypeVar
 
-from structlog import get_logger
+import instructor
 from litellm import Router, completion
+from pydantic import BaseModel
+from structlog import get_logger
 
 from app.services.cache import EstimationCache
 
@@ -41,6 +44,7 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
 }
 
+T = TypeVar("T", bound=BaseModel)
 
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
     base = _normalise_model_name(model)
@@ -68,6 +72,23 @@ def _provider_from_model(model: str) -> str:
     elif name.startswith("deep"):
         return "deepseek"
     return "unknown"
+
+
+def _thinking_off_extra_body(*, model: str, enable_thinking: bool) -> dict[str, Any]:
+    """Provider kwargs that switch default-on thinking off, when it is off.
+
+    DeepSeek thinks by default and bills the chain of thought as output, so it has
+    to be switched off explicitly. Anthropic's extended thinking is opt-in, so
+    there is nothing to disable there — and sending DeepSeek's switch to it would
+    be an invalid body on the fallback path.
+
+    The structured (Instructor) paths need this too: Instructor sends
+    ``tool_choice``, and DeepSeek rejects it while thinking is on with
+    "Thinking mode does not support this tool_choice".
+    """
+    if enable_thinking or _provider_from_model(model) != "deepseek":
+        return {}
+    return {"extra_body": {"thinking": {"type": "disabled"}}}
 
 
 class LLMWrapper:
@@ -120,6 +141,10 @@ class LLMWrapper:
             fallbacks=[{"estimator": ["estimator"]}],
             num_retries=num_retries,
         )
+
+        # Instructor wraps ``litellm.completion`` so we can call any of the
+        # underlying providers with the same ``response_model=`` API.
+        self._instructor = instructor.from_litellm(completion)
 
     # ------------------------------------------------------------------
     # Public API
@@ -194,6 +219,101 @@ class LLMWrapper:
         )
         self.cache.set(cache_key, result)
         return {**result, "cache_hit": False}
+
+    def complete_structured(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+        response_model: type[T],
+        model_override: str | None = None,
+        max_tokens: int = 4000,
+        max_retries: int = 6,
+    ) -> tuple[T, dict[str, Any]]:
+        """Structured (Instructor) variant of :meth:`complete` for one turn.
+
+        Builds the ``messages`` array and delegates to
+        :meth:`complete_structured_chat`. Unlike :meth:`complete` it does not
+        touch the exact-match cache: the caller validates the typed payload and
+        decides what — if anything — is safe to store.
+        """
+        return self.complete_structured_chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            response_model=response_model,
+            model_override=model_override,
+            max_tokens=max_tokens,
+            max_retries=max_retries,
+        )
+
+    def complete_structured_chat(
+            self,
+            *,
+            messages: list[dict[str, str]],
+            response_model: type[T],
+            model_override: str | None = None,
+            max_tokens: int = 4000,
+            max_retries: int = 6,
+    ) -> tuple[T, dict[str, Any]]:
+        """Conversational variant of :meth:`complete_structured`.
+
+        Accepts a pre-built ``messages`` list (system + N user/assistant pairs +
+        current user). Bypasses the Router for deterministic routing — same
+        rationale as ``complete_structured``: the LiteLLM Router would
+        round-robin between deployments and could non-deterministically pick
+        the fallback. Instructor handles re-prompts when Pydantic validators
+        raise. DeepSeek's default thinking mode is switched off explicitly, because
+        Instructor's ``tool_choice`` is rejected while it is on.
+        """
+        target_model = model_override or self.primary_model
+        api_key = self._api_key_for(target_model)
+
+        log.info(
+            "llm_structured_chat_started",
+            model=target_model,
+            response_model=response_model.__name__,
+            messages=len(messages),
+        )
+        call_kwargs: dict[str, Any] = {
+            "model": target_model,
+            "api_key": api_key,
+            "timeout": self.timeout,
+            "messages": messages,
+            "response_model": response_model,
+            "max_tokens": max_tokens,
+            "max_retries": max_retries,
+            **_thinking_off_extra_body(
+                model=target_model, enable_thinking=self.enable_thinking
+            ),
+        }
+        t0 = time.perf_counter()
+        try:
+            result = self._instructor.chat.completions.create(**call_kwargs)
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            log.error(
+                "llm_structured_chat_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                latency_ms=latency_ms,
+            )
+            raise
+
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        meta = {
+            "model": _normalise_model_name(target_model),
+            "provider": _provider_from_model(target_model),
+            "latency_ms": latency_ms,
+        }
+        log.info(
+            "llm_structured_chat_completed",
+            model=meta["model"],
+            provider=meta["provider"],
+            latency_ms=latency_ms,
+        )
+        return result, meta
 
 
     @staticmethod
@@ -327,13 +447,12 @@ class LLMWrapper:
             "max_tokens": max_tokens,
         }
         target_model = model_override or self.primary_model
-        if thinking_budget is None and not self.enable_thinking:
-            # DeepSeek thinks by default and bills the chain of thought as output, so
-            # it has to be switched off explicitly. Anthropic's extended thinking is
-            # opt-in, so there is nothing to disable there — and sending DeepSeek's
-            # switch to it would be an invalid body on the fallback path.
-            if _provider_from_model(target_model) == "deepseek":
-                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        if thinking_budget is None:
+            kwargs.update(
+                _thinking_off_extra_body(
+                    model=target_model, enable_thinking=self.enable_thinking
+                )
+            )
 
         if stream:
             kwargs["stream"] = True
@@ -352,18 +471,28 @@ class LLMWrapper:
                 )
         return kwargs
 
+    def _api_key_for(self, model: str) -> str | None:
+        """Credential matching the model's provider.
+
+        Each provider needs its own key: sending the DeepSeek key to an OpenAI
+        model is an authentication error, not a fallback. DeepSeek itself keeps
+        the DEEPSEEK-then-OPENAI fallback documented in ``Settings.llm_api_key``
+        (it is consumed over the OpenAI-compatible API).
+        """
+        provider = _provider_from_model(model)
+        if provider == "anthropic":
+            return self.anthropic_api_key
+        if provider == "openai":
+            return self.openai_api_key
+        return self.deepseek_api_key or self.openai_api_key
+
     def _dispatch(self, *, model_override: str | None, **kwargs: Any) -> Any:
         """Call the Router (with fallback) or LiteLLM directly when the caller
         wants a specific model."""
         if model_override:
-            api_key = (
-                self.anthropic_api_key
-                if _provider_from_model(model_override) == "anthropic"
-                else self.deepseek_api_key
-            )
             return completion(
                 model=model_override,
-                api_key=api_key,
+                api_key=self._api_key_for(model_override),
                 timeout=self.timeout,
                 num_retries=self.num_retries,
                 **kwargs,

@@ -1,0 +1,13 @@
+<previous_metadata>
+{% if previous_is_empty %}No facts captured yet.{% else %}{{ previous.model_dump_json(indent=2) }}{% endif %}
+</previous_metadata>
+
+<latest_turn>
+{{ transcript }}
+</latest_turn>
+
+<latest_estimation>
+{{ result.model_dump_json(indent=2) }}
+</latest_estimation>
+
+Extract the durable project facts established by the latest turn.

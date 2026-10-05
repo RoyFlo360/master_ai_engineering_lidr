@@ -4,10 +4,11 @@ AI Engineering Master con Lidr
 A FastAPI service that turns a meeting transcription — or a typed project brief —
 into a software project estimation, with three Streamlit clients:
 
-- `streamlit_app_loader.py` — a form over the typed `POST /api/v1/new-estimate`
-  endpoint: project type, detail level and output format drive a versioned prompt.
-  Its sidebar reports the last call's tokens and cost plus the running totals for
-  every request the API has served. **This is the client `docker compose` runs.**
+- `streamlit_app_loader.py` — the client `docker compose` runs. Two tabs: the typed
+  `POST /api/v1/new-estimate` form (project type, detail level and output format drive
+  a versioned prompt, with tokens/cost/running totals in the sidebar), and a
+  **Conversational session** tab over the `/sessions` endpoints (multi-turn, PDF/DOCX
+  attachments, live `ProjectMetadata` panel, "New conversation").
 - `streamlit_app.py` — streams the answer token by token over SSE and tracks
   token usage and cost in the sidebar.
 - `streamlit_app_estimation_api.py` — waits for the full JSON response, then shows
@@ -25,7 +26,7 @@ its settings validation without one.
 ```shell
 uv sync                                # create/refresh .venv from uv.lock
 uv run uvicorn app.main:app --reload   # API on http://localhost:8000
-uv run streamlit run streamlit_app_loader.py          # form client (the one compose runs)
+uv run streamlit run streamlit_app_loader.py          # two-tab client (typed + session), the one compose runs
 uv run streamlit run streamlit_app.py                 # streaming client on :8501
 uv run streamlit run streamlit_app_estimation_api.py  # JSON client, also :8501
 uv lock --check                        # is uv.lock still in step with pyproject.toml?
@@ -42,7 +43,7 @@ reads that path, not a `config.toml` at the repository root.
 ## Running the whole stack with Docker
 
 `docker-compose.yml` builds one image and runs Redis, the API and the Streamlit client
-(`streamlit_app_loader.py`, the typed flow):
+(`streamlit_app_loader.py`, the two-tab client):
 
 ```shell
 docker compose up --build      # build and start in the foreground (Ctrl-C stops it)
@@ -90,13 +91,17 @@ docker compose up -d redis     # just Redis on localhost:6379, for local (non-Do
   Events with `token` frames, then one `usage` frame carrying the token counts and
   cost, then `done`. Errors arrive as an `error` frame.
 - `GET /api/v1/usage` — running totals for this API process.
+- `POST /sessions` — create a conversational session; returns its UUID.
+- `POST /sessions/{session_id}/estimate` — multi-turn estimate from `multipart/form-data`
+  (transcript plus optional PDF/DOCX attachments); returns the structured estimation.
+- `GET /sessions/{session_id}` — session metadata and history length (debug view).
 - `GET /health`, `GET /docs`.
 
 ### POST /api/v1/new-estimate
 
 ```json
 {
-  "description": "20–2000 characters describing the project",
+  "description": "20–80000 characters describing the project",
   "project_type": "mobile_app",
   "detail_level": "medium",
   "output_format": "phases_table"
@@ -122,7 +127,7 @@ and what the call used:
 }
 ```
 
-A description outside 20–2000 characters, an unknown enum value or a missing field is
+A description outside 20–80000 characters, an unknown enum value or a missing field is
 a 422. If the provider call fails the endpoint answers 502
 (`Upstream LLM call failed`) and logs the cause as `estimation_endpoint_error`.
 
@@ -151,6 +156,68 @@ Running totals over every call this API process has served:
 Read by the loader's sidebar. See "Cache, cost and the running total" below for what
 it does and does not survive.
 
+### Conversational sessions
+
+The Session-5 flow keeps a conversation in process memory, so a later turn can refine
+an earlier estimation. `streamlit_app_loader.py` exposes it in a **Conversational
+session** tab: the page creates a session on load and keeps its id in
+`st.session_state`, sends the transcript plus optional attachments, renders the
+structured result, shows the live `ProjectMetadata` panel, and offers a **New
+conversation** button. The original typed form is still there in its own tab.
+
+```
+POST /sessions
+→ 201 {"session_id": "8f3c…"}
+
+POST /sessions/8f3c…/estimate        (multipart/form-data)
+  transcript      text   (20–80,000 chars)
+  project_type    mobile_app | web_saas | internal_tool | data_pipeline
+  detail_level    summary | medium | detailed
+  output_format   phases_table | line_items | narrative
+  attachments     zero or more .pdf / .docx files (optional)
+→ 200 {
+    "result": {"summary": "…", "confidence_pct": 80,
+               "phases": [{"name": "Discovery", "duration_weeks": 1,
+                           "cost_eur": 500, "summary": "…"}],
+               "total_duration_weeks": 1, "total_cost_eur": 500},
+    "prompt_version": "v2",
+    "cache_hit": false
+  }
+```
+
+The answer uses the dedicated `StructuredEstimationResponse` schema — the free-text
+`/new-estimate` response is a different shape on purpose. Errors map to `404` (unknown
+session), `400` (input guardrail: moderation, prompt injection or PII), `415`
+(unsupported attachment), `422` (unreadable attachment or a bad form field) and `502`
+(upstream LLM failure).
+
+**Attachments — Path B.** The brief allowed either a provider Files API (Path A) or
+local extraction (Path B); we chose **Path B**. The service extracts the text with
+`pypdf` / `python-docx` and fences each document into the transcript
+(`--- attachment: <filename> --- … --- end attachment ---`) before the prompt is
+rendered. That keeps the flow provider-agnostic (the Files API differs per provider,
+and DeepSeek — our default — has none), needs no extra storage or cleanup, and makes
+the attachment path testable without a network call. The cost is fidelity: a scanned
+or image-only PDF yields no text, and very large documents are truncated to
+`MAX_ATTACHMENT_CHARS`.
+
+**Metadata — heuristic, with an LLM fallback.** After each turn the service refreshes
+`ProjectMetadata` with `app/sessions/heuristics.py`: regexes for the project name and
+team size, a curated technology vocabulary, and `agreed_scope` set to the latest
+non-empty estimation summary. The heuristic was chosen over an LLM-only extractor
+because it is cheap (no second billed call per turn), synchronous and deterministic,
+which also makes it easy to test. When it finds no project name, team size or
+technology for a turn, the narrow LLM extractor (`metadata_extraction/v1/`) runs as a
+fallback; set `METADATA_LLM_FALLBACK=false` to turn that off.
+
+**The window.** `ConversationHistory` keeps the last `MAX_CONVERSATION_TURNS` user/
+assistant pairs (default 6) and drops the oldest ones. The system prompt is never
+stored: it is regenerated from the current `ProjectMetadata` every turn and prepended
+by `to_messages(system_prompt=...)`, so it is always present and always current.
+
+Sessions live in the API process's memory: a restart or a second worker loses or
+forks them. That is a known limit of the exercise, not a bug.
+
 ## Prompts
 
 Templates live at `app/prompts/<use_case>/<version>/<role>.j2` and are rendered by
@@ -169,6 +236,11 @@ The version is a string at the call site (`PROMPT_VERSION = "v1"` in
 cache hashes the rendered prompt text. The older transcription flow still assembles its
 prompt in Python (`app/services/llm_service.py`, from `app/context/examples.py`).
 
+The conversational flow renders `estimation/v2/` (the v1 instructions plus a
+`<project_metadata>` block that is empty on the first turn and carries the facts
+agreed so far afterwards). `metadata_extraction/v1/` is the LLM fallback, used only
+when the heuristic extractor finds nothing structured for a turn.
+
 ## Configuration
 
 Settings are read from `.env` via `app/config.py`:
@@ -183,11 +255,27 @@ Settings are read from `.env` via `app/config.py`:
   thinking off billed 646 tokens for 646 streamed characters at $0.0007 and 12.2s.
   Set `ENABLE_THINKING=true` to get the reasoning back. The switch is only sent to
   DeepSeek — Anthropic's extended thinking is opt-in, so there is nothing to disable
-  on the fallback path.
+  on the fallback path. The structured (Instructor) calls send the same switch:
+  with thinking on, DeepSeek rejects Instructor's `tool_choice` ("Thinking mode does
+  not support this tool_choice"), so structured output requires it off.
 - `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — for `deepseek`, the
-  key may live in either the DeepSeek or the legacy OpenAI slot.
+  key may live in either the DeepSeek or the legacy OpenAI slot. Model overrides use
+  their own provider's key: the `gpt-4o-mini` metadata extractor sends
+  `OPENAI_API_KEY`, never the DeepSeek one.
 - `REDIS_URL` / `CACHE_TTL` — exact-match response cache. If Redis is unreachable
   the service logs a warning and continues uncached, so estimates still work.
+- `MAX_ATTACHMENT_CHARS` — per-attachment cap on extracted text (default 20000).
+- `MAX_CONVERSATION_TURNS` — the session history window, counted in user/assistant
+  pairs (default 6).
+- `METADATA_LLM_FALLBACK` — whether the LLM metadata extractor runs when the
+  heuristic finds no project name, team size or technology for a turn (default `true`).
+- `METADATA_EXTRACTOR_MODEL` — the small model used by that fallback.
+- `EMBEDDING_MODEL` / `SEMANTIC_CACHE_THRESHOLD` / `SEMANTIC_CACHE_TTL` /
+  `SEMANTIC_CACHE_LOG_ONLY` — the semantic cache. It needs `OPENAI_API_KEY` for
+  embeddings **and** a Redis with RediSearch (e.g. `redis/redis-stack`). On vanilla
+  `redis:7-alpine` — which `docker-compose.yml` uses — the RediSearch check runs
+  before the embedding client is built, so the cache is disabled immediately
+  instead of stalling the first request on an OpenAI round-trip.
 - `LLM_TIMEOUT` / `LLM_RETRIES`.
 
 Prices per model live in `MODEL_COSTS` in `app/services/llm_wrapper.py`. A model
@@ -244,6 +332,8 @@ elsewhere and `CACHE_TTL` controls how long entries live.
 ```shell
 uv run pytest                                    # whole suite
 uv run pytest tests/test_estimation_v1.py -v     # typed flow: route contract + prompt wiring
+uv run pytest tests/test_sessions_api.py -v      # conversational endpoints (sync integration)
+uv run pytest tests/test_sessions_integration.py -v  # async scenarios: metadata, PDF, window, weird, perf
 uv run pytest tests/test_estimations_api.py -v   # one file
 uv run pytest tests/test_llm_service.py -v
 uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost_after_the_tokens" -v
@@ -252,7 +342,9 @@ uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost
 The suite is hermetic: settings are built in-process (`_env_file=None`), both provider
 paths are stubbed — a recorder for `/estimate`, an injected fake wrapper for the
 streaming and typed flows — and the usage ledger is replaced per test, so no test reads
-your `.env`, calls the network, or accumulates into the process-wide totals.
+your `.env`, calls the network, or accumulates into the process-wide totals. The
+session tests replace the store and the estimation service through
+`app.dependency_overrides`, so no provider or Redis is reached either.
 
 ## Specs
 

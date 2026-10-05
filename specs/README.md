@@ -54,6 +54,10 @@ Statuses: `Draft` · `Accepted` · `Implemented` · `Superseded by NNN`.
 - [006 — Running usage totals](006-running-usage-totals.md)
   — Implemented · the process-local ledger and `GET /api/v1/usage`, with the
   restart/reload limit recorded as a known one
+- [007 — Conversational sessions, attachments and the structured response split](007-conversational-sessions.md)
+  — Implemented · the `/sessions` endpoints, why `EstimationResponse` earned a
+  sibling instead of a required `result` field, and the semantic-cache degradation
+  that lets vanilla Redis keep serving requests
 
 ## How these were written
 
@@ -63,5 +67,8 @@ their "Verification" sections say plainly where evidence is missing — spec 003
 test coverage at all, which is now written down instead of being assumed.
 
 **004–006 were also written after their code**, for the same reason: the folder was
-created at the end of that session. Everything from **007 on is written first**, which
-is the point of the folder.
+created at the end of that session.
+
+**007 was written after the Session-5 code**, documenting the fix that made it run
+(schema split, router mount, missing settings and prompts). Everything from **008 on
+is written first**, which is the point of the folder.
