@@ -41,12 +41,34 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379"
     CACHE_TTL: int = 86400
     # Session 5 — conversational sessions, attachments, guardrails, semantic cache.
-    MAX_ATTACHMENT_CHARS: int = 20_000
+    # Per-attachment cap on extracted text. 60_000 so the stress corpus's 50 KB
+    # point sits just under the cap and its 100 KB point triggers truncation.
+    MAX_ATTACHMENT_CHARS: int = 60_000
     MAX_CONVERSATION_TURNS: int = 6
     METADATA_EXTRACTOR_MODEL: str = "gpt-4o-mini"
     # Metadata is refreshed heuristically; the LLM extractor only runs when the
     # heuristic finds no project name/team/technology for the turn.
     METADATA_LLM_FALLBACK: bool = True
+    # Session 6 — hybrid memory compression, dynamic tier, Actor-Critic-Boss.
+    # Anchor detector: "heuristic" (regex over key phrases) or "llm" (binary
+    # classifier via Instructor). Heuristic is the default for cost.
+    ANCHOR_DETECTION_MODE: Literal["heuristic", "llm"] = "heuristic"
+    # Cheap model used by the cumulative summarizer (history compression).
+    COMPRESSION_MODEL: str = "gpt-4o-mini"
+    # Conversational prompt version used by ``estimate_conversational``.
+    # v2 = pre-live-session baseline. v3 = adds <audience> driven by tier and an
+    # optional <critic_feedback> block consumed by the Boss.
+    CONVERSATIONAL_PROMPT_VERSION: str = "v3"
+    # Critic model (read-only auditor; cheap is fine).
+    CRITIC_MODEL: str = "gpt-4o-mini"
+    # Fallback for the auxiliary calls (metadata extractor, summarizer, critic,
+    # anchor classifier). Those default to an OpenAI model; if that provider is
+    # unavailable (no credits / quota), retry the call once on this model.
+    # Empty string disables the fallback.
+    AUX_FALLBACK_MODEL: str | None = "deepseek/deepseek-flash"
+    # Max iterations the Boss may drive (each = 1 actor + 1 critic call).
+    # Three is the practical floor: one initial draft + two directed retries.
+    BOSS_MAX_ITERATIONS: int = 3
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     SEMANTIC_CACHE_THRESHOLD: float = 0.92
     SEMANTIC_CACHE_TTL: int = 86400
@@ -67,7 +89,7 @@ class Settings(BaseSettings):
         return None
 
     @model_validator(mode="after")
-    def validate_api_key_for_provider(self) -> Settings:
+    def validate_api_key_for_provider(self) -> "Settings":
         """Ensure the API key for the selected LLM provider is present."""
         if not self.llm_api_key:
             raise ValueError(

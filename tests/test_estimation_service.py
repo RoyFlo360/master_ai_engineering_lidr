@@ -57,7 +57,17 @@ class FakeStructuredWrapper:
                 "provider": "deepseek",
                 "latency_ms": 1,
             }
-        return self._metadata, {
+        if response_model is ProjectMetadata:
+            return self._metadata, {
+                "model": "gpt-4o-mini",
+                "provider": "openai",
+                "latency_ms": 1,
+            }
+        # E.g. the summarizer's private ``_SummaryEnvelope``: it must expose
+        # ``.summary`` (a string), so answer with a compatible stand-in.
+        from types import SimpleNamespace
+
+        return SimpleNamespace(summary="A running summary of the conversation."), {
             "model": "gpt-4o-mini",
             "provider": "openai",
             "latency_ms": 1,
@@ -123,9 +133,36 @@ def test_conversational_estimation_returns_a_structured_response():
     )
 
     assert isinstance(response, StructuredEstimationResponse)
-    assert response.prompt_version == "v2"
+    assert response.prompt_version == "v3"
     assert response.cache_hit is False
     assert response.result.total_cost_eur == 500
+
+
+def test_turn_index_is_a_true_counter_and_does_not_saturate_at_the_window_cap():
+    """Regression: turn_index used to be ``len(history.messages)//2``, which caps
+    at ``max_turns`` once the window fills — so turns 7..20 all reported 7. It is
+    a 1-based per-session counter and must keep climbing.
+    """
+    wrapper = FakeStructuredWrapper(estimation_result=estimation(confidence_pct=80))
+    service = build_service(wrapper)
+    session = SessionStore().create()  # max_turns=6
+
+    seen: list[int] = []
+    for i in range(8):
+        response = service.estimate_conversational(
+            session=session,
+            transcript=f"Turn {i + 1}: a marketplace for furniture item {i}.",
+            project_type=ProjectType.MOBILE_APP,
+            detail_level=DetailLevel.MEDIUM,
+            output_format=OutputFormat.PHASES_TABLE,
+        )
+        seen.append(response.observation.turn_index)
+
+    assert seen == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert session.turns_seen == 8
+    # The window itself still caps at max_turns pairs.
+    assert len(session.history.messages) <= 2 * 6
+    assert response.observation.messages_in_window <= 2 * 6
 
 
 def test_the_estimation_call_carries_the_v2_system_prompt_and_the_transcript():
@@ -163,7 +200,7 @@ def test_the_turn_is_appended_to_the_history_as_json():
 
     roles = [m.role for m in session.history.messages]
     assert roles == ["user", "assistant"]
-    assert session.history.messages[0].content.startswith("<conversation_turn>")
+    assert session.history.messages[0].content.startswith("<project_description>")
     assert session.history.messages[1].content == estimation_result.model_dump_json()
 
 

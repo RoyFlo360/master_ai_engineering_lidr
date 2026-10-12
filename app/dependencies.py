@@ -39,6 +39,7 @@ def get_llm_wrapper() -> LLMWrapper:
         max_tokens=settings.MAX_OUTPUT_TOKENS,
         enable_thinking=settings.ENABLE_THINKING,
         cache=get_cache(),
+        aux_fallback_model=settings.AUX_FALLBACK_MODEL,
     )
 
 
@@ -112,6 +113,11 @@ def get_estimation_service() -> EstimationService:
         semantic_cache=get_semantic_cache(),
         openai_client=get_openai_client(),
         metadata_extractor_model=settings.METADATA_EXTRACTOR_MODEL,
+        compression_model=settings.COMPRESSION_MODEL,
+        anchor_detection_mode=settings.ANCHOR_DETECTION_MODE,
+        conversational_prompt_version=settings.CONVERSATIONAL_PROMPT_VERSION,
+        critic_model=settings.CRITIC_MODEL,
+        boss_max_iterations=settings.BOSS_MAX_ITERATIONS,
         enable_llm_metadata_fallback=settings.METADATA_LLM_FALLBACK,
     )
 

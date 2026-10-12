@@ -13,9 +13,14 @@
 
 services:
   redis:
-    image: redis:7-alpine
+    # Redis Stack ships RediSearch, which redisvl needs for the semantic cache's
+    # vector queries. Vanilla ``redis:7-alpine`` lacks it, so the semantic cache
+    # would stay a permanent no-op. The dependency probe still degrades to a
+    # no-op when the module (or an OPENAI_API_KEY for embeddings) is absent.
+    image: redis/redis-stack:7.4.0-v0
     ports:
       - "${REDIS_PORT:-6379}:6379"
+      - "${REDIS_INSIGHT_PORT:-8001}:8001"  # RedisInsight UI
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

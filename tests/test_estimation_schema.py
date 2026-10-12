@@ -88,6 +88,7 @@ def test_structured_response_carries_the_validated_result():
         "result",
         "prompt_version",
         "cache_hit",
+        "observation",
     }
 
 

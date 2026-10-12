@@ -133,6 +133,7 @@ def build_chat_stub(*, enable_thinking: bool = False) -> LLMWrapper:
     stub.anthropic_api_key = "anthropic-key"
     stub.timeout = 30
     stub.enable_thinking = enable_thinking
+    stub.aux_fallback_model = None
     stub._instructor = RecordingInstructor()
     return stub
 
@@ -233,3 +234,87 @@ def test_instructor_forwards_the_thinking_switch_to_litellm():
 
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
     assert "tool_choice" in captured  # what DeepSeek rejects while thinking is on
+
+
+# --- aux-model fallback (an OpenAI aux model with no credits -> DeepSeek) ----
+
+
+def _fail_primary_then_succeed(stub: LLMWrapper, monkeypatch) -> list[str]:
+    """Make ``gpt-4o-mini`` raise and every other model succeed. Return the call log."""
+    seen: list[str] = []
+
+    def fake_once(target_model, messages, response_model, max_tokens, max_retries):
+        seen.append(target_model)
+        if target_model == "gpt-4o-mini":
+            raise RuntimeError("You have no credits remaining")
+        return "OK", {"model": target_model}
+
+    monkeypatch.setattr(stub, "_structured_chat_once", fake_once)
+    return seen
+
+
+def test_aux_call_falls_back_to_the_configured_model(monkeypatch):
+    stub = build_chat_stub()
+    stub.aux_fallback_model = "deepseek/deepseek-flash"
+    seen = _fail_primary_then_succeed(stub, monkeypatch)
+
+    result, meta = LLMWrapper.complete_structured_chat(
+        stub,
+        messages=[{"role": "user", "content": "hi"}],
+        response_model=EstimationResult,
+        model_override="gpt-4o-mini",
+    )
+
+    assert seen == ["gpt-4o-mini", "deepseek/deepseek-flash"]
+    assert result == "OK"
+    assert meta["model"] == "deepseek/deepseek-flash"
+
+
+def test_primary_estimation_call_never_uses_the_aux_fallback(monkeypatch):
+    """No ``model_override`` == the main estimation call: it must not be re-routed."""
+    stub = build_chat_stub()
+    stub.aux_fallback_model = "deepseek/deepseek-flash"
+
+    def fake_once(target_model, *args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(stub, "_structured_chat_once", fake_once)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        LLMWrapper.complete_structured_chat(
+            stub,
+            messages=[{"role": "user", "content": "hi"}],
+            response_model=EstimationResult,
+        )
+
+
+def test_aux_fallback_disabled_reraises(monkeypatch):
+    stub = build_chat_stub()
+    stub.aux_fallback_model = None
+    seen = _fail_primary_then_succeed(stub, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="no credits"):
+        LLMWrapper.complete_structured_chat(
+            stub,
+            messages=[{"role": "user", "content": "hi"}],
+            response_model=EstimationResult,
+            model_override="gpt-4o-mini",
+        )
+
+    assert seen == ["gpt-4o-mini"]
+
+
+def test_aux_fallback_equal_to_primary_does_not_retry(monkeypatch):
+    stub = build_chat_stub()
+    stub.aux_fallback_model = "gpt-4o-mini"  # same as the override
+    seen = _fail_primary_then_succeed(stub, monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        LLMWrapper.complete_structured_chat(
+            stub,
+            messages=[{"role": "user", "content": "hi"}],
+            response_model=EstimationResult,
+            model_override="gpt-4o-mini",
+        )
+
+    assert seen == ["gpt-4o-mini"]

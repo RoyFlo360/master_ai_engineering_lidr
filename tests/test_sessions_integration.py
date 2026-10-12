@@ -107,7 +107,13 @@ class RecordingWrapper:
         self.calls.append({"messages": messages, "response_model": response_model})
         if response_model is EstimationResult:
             return self._result_factory(messages[-1]["content"]), meta()
-        return self.metadata_response, meta()
+        if response_model is ProjectMetadata:
+            return self.metadata_response, meta()
+        # The compression summarizer's private ``_SummaryEnvelope``: answer
+        # with a stand-in that exposes ``.summary``.
+        from types import SimpleNamespace
+
+        return SimpleNamespace(summary="Earlier turns summarised."), meta()
 
     def complete_structured(self, *, system_prompt, user_message, response_model, **kwargs):
         messages = [
@@ -262,7 +268,10 @@ async def test_eight_turns_never_send_more_than_max_turns(client, store, wrapper
     for call in estimation_calls:
         assert call["messages"][0]["role"] == "system"  # system prompt always first
         history_and_current = [m for m in call["messages"] if m["role"] != "system"]
-        assert len(history_and_current) <= 2 * MAX_TURNS + 1  # window + current user
+        # The composed context is bounded by: summary envelope (0 or 1) +
+        # sliding window (<= 2 * MAX_TURNS) + the current user turn. Anchors
+        # are unbounded by design and empty in this scenario.
+        assert len(history_and_current) <= 2 * MAX_TURNS + 2
 
     session = (await client.get(f"/sessions/{session_id}")).json()
     assert session["message_count"] == 2 * MAX_TURNS  # oldest pairs dropped
@@ -352,4 +361,7 @@ async def test_performance_smoke(client, store, wrapper):
     history = ConversationHistory(max_turns=MAX_TURNS)
     for index in range(5_000):
         history.append(user=f"u{index}", assistant=f"a{index}")
+    # Bounding is the compression policy's job; the plain window helper keeps
+    # the same invariant when called (see tests/test_compression_policy.py).
+    history._trim()
     assert len(history.messages) == 2 * MAX_TURNS

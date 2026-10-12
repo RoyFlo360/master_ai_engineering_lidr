@@ -58,6 +58,10 @@ Statuses: `Draft` · `Accepted` · `Implemented` · `Superseded by NNN`.
   — Implemented · the `/sessions` endpoints, why `EstimationResponse` earned a
   sibling instead of a required `result` field, and the semantic-cache degradation
   that lets vanilla Redis keep serving requests
+- [008 — Session 6: hybrid memory, audience tiers, Actor-Critic-Boss, evals](008-session-6-memory-tiers-and-acb.md)
+  — Implemented · anchor/ summary compression, the tier resolver and prompt v3, the
+  Critic+Boss loop and its audit trail, per-turn telemetry, and the `evals/` and
+  `evals/stress/` harnesses
 
 ## How these were written
 

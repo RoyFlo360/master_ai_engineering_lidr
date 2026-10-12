@@ -93,8 +93,12 @@ docker compose up -d redis     # just Redis on localhost:6379, for local (non-Do
 - `GET /api/v1/usage` — running totals for this API process.
 - `POST /sessions` — create a conversational session; returns its UUID.
 - `POST /sessions/{session_id}/estimate` — multi-turn estimate from `multipart/form-data`
-  (transcript plus optional PDF/DOCX attachments); returns the structured estimation.
-- `GET /sessions/{session_id}` — session metadata and history length (debug view).
+  (transcript plus optional PDF/DOCX attachments, and an optional `tier`); returns the
+  structured estimation plus a per-turn `observation` block.
+- `POST /sessions/{session_id}/estimate-acb` — the same contract run through the
+  Actor-Critic-Boss loop; returns the structured estimation plus the `acb` audit trail.
+- `GET /sessions/{session_id}` — session metadata, history length, anchor count, summary
+  size and the last resolved audience tier (debug view).
 - `GET /health`, `GET /docs`.
 
 ### POST /api/v1/new-estimate
@@ -218,6 +222,62 @@ by `to_messages(system_prompt=...)`, so it is always present and always current.
 Sessions live in the API process's memory: a restart or a second worker loses or
 forks them. That is a known limit of the exercise, not a bug.
 
+## Memory, audience tiers and Actor-Critic-Boss (Session 6)
+
+Three features extend the conversational flow past the plain sliding window.
+
+**Hybrid memory compression** (`app/sessions/compression/`). Across many turns an
+early commitment would fall out of the window and be lost. Instead, when the window
+overflows the policy peels the oldest pair and:
+
+- sends the user turn to the **anchor detector** — a curated regex set (NDA, signed
+  contract, frozen scope, locked budget, compliance, hard deadline) that promotes both
+  messages into `history.anchors`, which are never evicted (`ANCHOR_DETECTION_MODE=llm`
+  swaps the regex for an Instructor classifier); or
+- folds it into a single rolling `history.summary` via one cheap LLM call
+  (`COMPRESSION_MODEL`), which keeps the previous summary if the call fails.
+
+The composed context the model sees is `[summary?] + anchors + recent window`, and the
+system prompt is still regenerated every turn on top. Trimming now belongs to the
+policy, not to `append`.
+
+**Runtime audience tiers** (`app/sessions/tier_resolver.py`). The tier
+(`executive | pm | developer | default`) is resolved from the transcript and metadata
+by a precedence-ordered rule chain — an explicit `tier` form field always wins, then
+NDA/regulatory → executive, two-plus infra keywords → developer, a ≤2-person team →
+pm, else default — and the rule name is returned so `GET /sessions/{id}` can show
+*why*. Prompt **v3** turns the tier into an `<audience>` block (executive = risk-first
+and jargon-free; pm = milestones; developer = technical) and adds an explicit
+`<output_schema>` contract.
+
+**Actor-Critic-Boss** (`app/services/{critic,boss}.py`). `POST …/estimate-acb` runs the
+conversational pipeline through an audit loop: the **actor** drafts an estimation, an
+independent **critic** returns structured `CriticFeedback` (`accept | needs_iteration |
+reject` plus typed issues), and the **boss** decides — accept, iterate (re-render the
+prompt with `<critic_feedback>` and re-draft, up to `BOSS_MAX_ITERATIONS`), or
+synthesize. The synthesize path keeps the last draft and prepends the open caveats with
+a floored confidence rather than blanking the answer. The session records only the
+final result, and the response carries the `acb` trail for the UI.
+
+## Evals and stress
+
+Two CLIs measure the system without adding to the pytest suite.
+
+```shell
+uv run python -m evals.run --mode actor        # golden set; --mode acb for the Boss loop
+uv run python -m evals.stress.fixtures.build_pdfs   # once — builds the 5/20/50/100 KB PDFs
+uv run python -m evals.stress.run --http http://localhost:8000
+```
+
+`evals/` holds 16 `GoldenCase`s (`golden_dataset.json`) and three deterministic metrics
+— schema adherence, cost/duration bounds and content recall. `evals/run.py` fires each
+case at `/sessions/{id}/estimate` or `/sessions/{id}/estimate-acb` (in-process by
+default, `--http` for a live service), prints a per-case table and exits non-zero on
+any failing case. `evals/stress/` walks three ≥20-turn scenarios (`growing`, `pivot`,
+`contradiction`) across attachment sizes and repeats, writing a 22-column
+`results.csv` (gitignored) plus the population of `evals/stress/REPORT.md`. Both are
+hermetic in tests via `tests/test_evals_*.py` and `tests/test_stress_*.py`.
+
 ## Prompts
 
 Templates live at `app/prompts/<use_case>/<version>/<role>.j2` and are rendered by
@@ -264,12 +324,20 @@ Settings are read from `.env` via `app/config.py`:
   `OPENAI_API_KEY`, never the DeepSeek one.
 - `REDIS_URL` / `CACHE_TTL` — exact-match response cache. If Redis is unreachable
   the service logs a warning and continues uncached, so estimates still work.
-- `MAX_ATTACHMENT_CHARS` — per-attachment cap on extracted text (default 20000).
+- `MAX_ATTACHMENT_CHARS` — per-attachment cap on extracted text (default 60000).
 - `MAX_CONVERSATION_TURNS` — the session history window, counted in user/assistant
   pairs (default 6).
 - `METADATA_LLM_FALLBACK` — whether the LLM metadata extractor runs when the
   heuristic finds no project name, team size or technology for a turn (default `true`).
 - `METADATA_EXTRACTOR_MODEL` — the small model used by that fallback.
+- `ANCHOR_DETECTION_MODE` — `heuristic` (regex, no LLM call, default) or `llm`
+  (Instructor binary classifier) for the compression anchor detector.
+- `COMPRESSION_MODEL` — the cheap model that folds evicted turns into the rolling
+  summary.
+- `CONVERSATIONAL_PROMPT_VERSION` — the conversational template version (default `v3`;
+  `v2` is the Session-5 baseline without the audience block).
+- `CRITIC_MODEL` — the auditor model for the Actor-Critic-Boss loop.
+- `BOSS_MAX_ITERATIONS` — max actor+critic rounds before the Boss synthesizes.
 - `EMBEDDING_MODEL` / `SEMANTIC_CACHE_THRESHOLD` / `SEMANTIC_CACHE_TTL` /
   `SEMANTIC_CACHE_LOG_ONLY` — the semantic cache. It needs `OPENAI_API_KEY` for
   embeddings **and** a Redis with RediSearch (e.g. `redis/redis-stack`). On vanilla

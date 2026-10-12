@@ -21,11 +21,24 @@ def test_append_writes_a_user_and_an_assistant_message():
     ]
 
 
-def test_the_window_drops_the_oldest_pairs_first():
+def test_append_does_not_trim_so_compression_can_see_the_evicted_pairs():
+    """Trimming moved to CompressionPolicy: append must keep the full history
+    so the policy can route evicted pairs to anchors or the summary."""
     history = ConversationHistory(max_turns=2)
 
     for i in range(3):
         history.append(user=f"u{i}", assistant=f"a{i}")
+
+    assert len(history.messages) == 6  # 3 turns * (user + assistant), untrimmed
+    assert [m.content for m in history.messages] == ["u0", "a0", "u1", "a1", "u2", "a2"]
+
+
+def test_the_window_helper_drops_the_oldest_pairs_first():
+    history = ConversationHistory(max_turns=2)
+
+    for i in range(3):
+        history.append(user=f"u{i}", assistant=f"a{i}")
+    history._trim()
 
     assert len(history.messages) == 4  # 2 turns * (user + assistant)
     assert [m.content for m in history.messages] == ["u1", "a1", "u2", "a2"]
@@ -72,6 +85,31 @@ def test_to_messages_prepends_a_regenerated_system_prompt_when_given():
     assert messages[1]["role"] == "user"
     # The prompt is not part of the history itself.
     assert all(m["role"] != "system" for m in history.to_messages())
+
+
+def test_to_messages_orders_summary_then_anchors_then_window():
+    """The composed context order is load-bearing: summary first (oldest
+    context), then the anchors (durable commitments), then the live window."""
+    from app.sessions.models import Message
+
+    history = ConversationHistory(max_turns=6)
+    history.summary = "Earlier we agreed the stack."
+    history.anchors = [Message(role="user", content="signed the NDA")]
+    history.append(user="add Stripe", assistant="ok")
+
+    messages = history.to_messages()
+
+    assert messages[0]["role"] == "user"
+    assert "Earlier conversation summary" in messages[0]["content"]
+    assert messages[1] == {"role": "user", "content": "signed the NDA"}
+    assert messages[2] == {"role": "user", "content": "add Stripe"}
+    assert messages[3] == {"role": "assistant", "content": "ok"}
+
+
+def test_a_session_starts_without_a_resolved_tier():
+    session = Session()
+    assert session.last_resolved_tier is None
+    assert session.last_tier_rule is None
 
 
 # --- ProjectMetadata: emptiness and merge -----------------------------------

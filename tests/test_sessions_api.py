@@ -62,18 +62,30 @@ class FakeEstimationService:
         self.error: Exception | None = None
         self.result = estimation()
 
-    def estimate_conversational(self, *, session, transcript, project_type, detail_level, output_format):
+    def estimate_conversational(
+        self,
+        *,
+        session,
+        transcript,
+        project_type,
+        detail_level,
+        output_format,
+        tier=None,
+        attachments_total_chars=0,
+    ):
         self.seen = {
             "session": session,
             "transcript": transcript,
             "project_type": project_type,
             "detail_level": detail_level,
             "output_format": output_format,
+            "tier": tier,
+            "attachments_total_chars": attachments_total_chars,
         }
         if self.error is not None:
             raise self.error
         return StructuredEstimationResponse(
-            result=self.result, prompt_version="v2", cache_hit=False
+            result=self.result, prompt_version="v3", cache_hit=False
         )
 
 
@@ -161,7 +173,7 @@ def test_estimating_in_a_session_returns_the_structured_response(client, store, 
 
     assert response.status_code == 200
     body = response.json()
-    assert body["prompt_version"] == "v2"
+    assert body["prompt_version"] == "v3"
     assert body["cache_hit"] is False
     assert body["result"]["total_cost_eur"] == 500
     assert service.seen["transcript"] == TRANSCRIPT

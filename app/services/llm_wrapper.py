@@ -107,6 +107,7 @@ class LLMWrapper:
         max_tokens: int,
         enable_thinking: bool,
         cache: EstimationCache,
+        aux_fallback_model: str | None = None,
     ):
         self.openai_api_key = openai_api_key
         self.deepseek_api_key = deepseek_api_key
@@ -118,6 +119,9 @@ class LLMWrapper:
         self.max_tokens = max_tokens
         self.enable_thinking = enable_thinking
         self.cache = cache
+        # Only the auxiliary calls (those that pass ``model_override``) fall
+        # back to this model when their primary provider fails.
+        self.aux_fallback_model = aux_fallback_model or None
 
         self.router = Router(
             model_list=[
@@ -266,8 +270,41 @@ class LLMWrapper:
         the fallback. Instructor handles re-prompts when Pydantic validators
         raise. DeepSeek's default thinking mode is switched off explicitly, because
         Instructor's ``tool_choice`` is rejected while it is on.
+
+        When ``model_override`` is set (an auxiliary call: critic, summarizer,
+        metadata extractor, anchor classifier) and that model's provider fails,
+        the call is retried **once** on ``self.aux_fallback_model`` if configured.
+        The main estimation call passes no override and is never re-routed here.
         """
         target_model = model_override or self.primary_model
+        try:
+            return self._structured_chat_once(
+                target_model, messages, response_model, max_tokens, max_retries
+            )
+        except Exception as exc:  # noqa: BLE001
+            fallback = self.aux_fallback_model
+            if model_override and fallback and fallback != target_model:
+                log.warning(
+                    "llm_structured_chat_fallback",
+                    primary=target_model,
+                    fallback=fallback,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:160],
+                )
+                return self._structured_chat_once(
+                    fallback, messages, response_model, max_tokens, max_retries
+                )
+            raise
+
+    def _structured_chat_once(
+            self,
+            target_model: str,
+            messages: list[dict[str, str]],
+            response_model: type[T],
+            max_tokens: int,
+            max_retries: int,
+    ) -> tuple[T, dict[str, Any]]:
+        """One Instructor call on ``target_model``; returns ``(model, meta)``."""
         api_key = self._api_key_for(target_model)
 
         log.info(
@@ -290,7 +327,18 @@ class LLMWrapper:
         }
         t0 = time.perf_counter()
         try:
+            # ``create_with_completion`` also returns the raw provider completion,
+            # which carries the token usage. That is how the per-turn
+            # ``TurnObservation`` gets real token counts and cost instead of zeros
+            # (the plain ``create`` call returns only the parsed model).
+            result, completion = self._instructor.chat.completions.create_with_completion(
+                **call_kwargs
+            )
+        except AttributeError:
+            # Defensive: an instructor build without ``create_with_completion``
+            # still works — we just lose the usage numbers.
             result = self._instructor.chat.completions.create(**call_kwargs)
+            completion = None
         except Exception as exc:
             latency_ms = int((time.perf_counter() - t0) * 1000)
             log.error(
@@ -302,16 +350,26 @@ class LLMWrapper:
             raise
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
+        usage = _usage_from_completion(completion)
         meta = {
             "model": _normalise_model_name(target_model),
             "provider": _provider_from_model(target_model),
             "latency_ms": latency_ms,
+            **usage,
+            "cost_usd": _estimate_cost(
+                _normalise_model_name(target_model),
+                usage["tokens_in"],
+                usage["tokens_out"],
+            ),
         }
         log.info(
             "llm_structured_chat_completed",
             model=meta["model"],
             provider=meta["provider"],
             latency_ms=latency_ms,
+            tokens_in=usage["tokens_in"],
+            tokens_out=usage["tokens_out"],
+            cost_usd=meta["cost_usd"],
         )
         return result, meta
 
@@ -547,3 +605,16 @@ def _extract_delta(chunk: Any) -> str:
         return ""
     content = getattr(delta, "content", None)
     return content or ""
+
+
+def _usage_from_completion(completion: Any | None) -> dict[str, int]:
+    """Token counts from a raw Instructor/LiteLLM completion, zeros if absent.
+
+    The conversational path is not cached, so these counts are always the
+    live call's. ``turn_index``-level telemetry (``TurnObservation``) reads
+    them, and the stress runner prices each turn from them.
+    """
+    usage = getattr(completion, "usage", None) if completion is not None else None
+    tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
+    tokens_out = int(getattr(usage, "completion_tokens", 0) or 0)
+    return {"tokens_in": tokens_in, "tokens_out": tokens_out}
