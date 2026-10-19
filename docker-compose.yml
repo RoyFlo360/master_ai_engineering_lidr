@@ -29,10 +29,15 @@ services:
 
   api:
     build: .
-    # --reload-dir keeps the watcher off the bind-mounted .venv and .git.
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
+    # Apply pending migrations, then serve. The bind mount makes alembic/ and
+    # alembic.ini available; a standalone image copies them explicitly.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app"
     environment:
       REDIS_URL: redis://redis:6379
+      # Compose uses Postgres; the host default is a SQLite file (see .env.example).
+      DATABASE_URL: postgresql+psycopg://estimator:estimator@postgres:5432/estimator
       # Windows bind mounts do not emit inotify events, so poll for changes.
       WATCHFILES_FORCE_POLLING: "true"
     env_file:
@@ -44,6 +49,29 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # Postgres for the ingestion persistence layer (jobs + pseudonym mappings).
+  # pgvector ships in the image so the retrieval phase does not need a new
+  # service; the extension is NOT enabled yet. Host port 5433 avoids colliding
+  # with any local Postgres on 5432.
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: estimator
+      POSTGRES_PASSWORD: estimator
+      POSTGRES_DB: estimator
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U estimator -d estimator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   streamlit:
     build: .
@@ -63,3 +91,6 @@ services:
       - "${STREAMLIT_PORT:-8501}:8501"
     depends_on:
       - api
+
+volumes:
+  postgres_data:

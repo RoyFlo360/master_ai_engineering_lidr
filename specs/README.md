@@ -62,6 +62,17 @@ Statuses: `Draft` · `Accepted` · `Implemented` · `Superseded by NNN`.
   — Implemented · anchor/ summary compression, the tier resolver and prompt v3, the
   Critic+Boss loop and its audit trail, per-turn telemetry, and the `evals/` and
   `evals/stress/` harnesses
+- [009 — Session 6: per-turn observation, memory drift metrics, stress runner](009-session-6-stress-and-report.md)
+  — Implemented · the 13-field `turn_observed` event, `MemoryDriftMetric`, the
+  `N ∈ {1,3,6,10,20}` scenario builder, and the filled stress report
+- [010 — Session 7: embedding pipeline](010-session-7-embedding-pipeline.md)
+  — Implemented · structural chunking with a contextual header, batched
+  `text-embedding-3-small` calls, `POST /embeddings/ingest`, and the three-pair
+  cosine sanity check
+- [011 — Session 7: data ingestion](011-session-7-data-ingestion.md)
+  — Implemented · the versioned catalog, JSON/TXT parsers, cleaning + Pandera
+  validation and pseudonymization **inside** the run, job tracking, and the
+  architecture-decision CLI
 
 ## How these were written
 

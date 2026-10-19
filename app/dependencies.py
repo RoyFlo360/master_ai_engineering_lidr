@@ -9,6 +9,8 @@ from redis import from_url
 from structlog import get_logger
 
 from app.config import get_settings
+from app.embedding_pipeline.chunker import JSONStructuralChunker
+from app.embedding_pipeline.embedder import OpenAIEmbedder
 from app.services.cache import EstimationCache
 from app.services.estimation import EstimationService
 from app.services.llm_wrapper import LLMWrapper
@@ -41,6 +43,28 @@ def get_llm_wrapper() -> LLMWrapper:
         cache=get_cache(),
         aux_fallback_model=settings.AUX_FALLBACK_MODEL,
     )
+
+
+@lru_cache
+def get_chunker() -> JSONStructuralChunker:
+    """Stateless structural chunker for the embedding pipeline (Session 7)."""
+    return JSONStructuralChunker()
+
+
+@lru_cache
+def get_embedder() -> OpenAIEmbedder | None:
+    """OpenAI embedder for the embedding pipeline.
+
+    Returns ``None`` when no ``OPENAI_API_KEY`` is configured; the router maps
+    that to a generic 500. Mirrors ``get_semantic_cache``: the rest of the
+    service stays usable on a DeepSeek-only deployment.
+    """
+    settings = get_settings()
+    client = get_openai_client()
+    if client is None:
+        log.warning("embedder_disabled", reason="no_openai_key")
+        return None
+    return OpenAIEmbedder(client=client, model=settings.EMBEDDING_MODEL)
 
 
 @lru_cache

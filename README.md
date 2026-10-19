@@ -222,6 +222,161 @@ by `to_messages(system_prompt=...)`, so it is always present and always current.
 Sessions live in the API process's memory: a restart or a second worker loses or
 forks them. That is a known limit of the exercise, not a bug.
 
+## Embeddings (Session 7)
+
+`app/embedding_pipeline/` turns normalized budget JSON into vectors. This is the
+first step of semantic search: vectors are generated in memory and returned over
+HTTP. Nothing is persisted yet — that is the retrieval phase.
+
+**Chunking is structural.** One budget component becomes exactly one chunk. Each
+chunk's text is prefixed with a contextual header (project summary, sector, year,
+main technology) so a component like "Authentication backend" never loses which
+client it belongs to. No overlap and no fixed-size splitting: an oversized
+component is surfaced through `token_count`, not silently cut.
+
+**Embedding is batched.** `OpenAIEmbedder` calls `text-embedding-3-small` with up
+to 100 chunks per request, retries only rate limits (1s/2s/4s), and reports tokens
+and estimated cost at $0.02 per 1M input tokens.
+
+```shell
+POST /embeddings/ingest
+{"budgets": [ <Budget>, ... ]}
+→ 200 {"chunks": [ <EmbeddedChunk>, ... ],
+       "stats": {"total_budgets", "total_chunks", "total_tokens", "estimated_cost_usd"}}
+```
+
+`422` for a validation failure (bad enum, out-of-range value, unknown field,
+duplicate identifier, or payload cap exceeded), `500` with a generic message when
+no `OPENAI_API_KEY` is configured or the provider fails. Details go to the log,
+never the response. The route appears in `/docs`.
+
+Request caps: ≤100 budgets, ≤100 components per budget, ≤500 chunks per request,
+≤20,000 characters per description.
+
+With the 15-budget sample (`data/budgets_sample.json`): **52 chunks, 4,126 tokens,
+≈$0.0000825**.
+
+```shell
+# bash / Git Bash — the sample is a bare array; the endpoint wants {"budgets": [...]}
+curl -s -X POST http://localhost:8000/embeddings/ingest \
+  -H 'Content-Type: application/json' \
+  -d "{\"budgets\": $(cat data/budgets_sample.json)}"
+```
+
+```powershell
+# PowerShell 5.1: do NOT round-trip through ConvertFrom-Json/ConvertTo-Json.
+# It serialises the array as {"value": [...], "Count": N} and the request 422s.
+# Build the wrapper as text instead:
+$json = '{"budgets":' + (Get-Content data/budgets_sample.json -Raw) + '}'
+$r = Invoke-RestMethod -Method Post -Uri http://localhost:8000/embeddings/ingest `
+  -ContentType 'application/json' -Body $json
+$r.stats
+```
+
+```powershell
+# curl.exe ships with Windows 10+ and is the least surprising option
+$json = '{"budgets":' + (Get-Content data/budgets_sample.json -Raw) + '}'
+Set-Content "$env:TEMP\budgets.json" $json -Encoding utf8
+curl.exe -s -o NUL -w "status=%{http_code} size=%{size_download}B`n" `
+  -X POST http://localhost:8000/embeddings/ingest `
+  -H "Content-Type: application/json" --data-binary "@$env:TEMP\budgets.json"
+```
+
+### Sanity check: `scripts/compare.py`
+
+Embeds two texts and prints their cosine similarity, computed with the standard
+library (no NumPy). Run it outside the container with the `.env` loaded, or inside
+the container (the compose service is named `api`):
+
+```shell
+uv run python scripts/compare.py \
+  --text-a "OAuth 2.0 authentication backend for fintech" \
+  --text-b "JWT-based authorization service for banking app"
+
+docker compose exec api python scripts/compare.py \
+  --text-a "OAuth 2.0 authentication backend for fintech" \
+  --text-b "JWT-based authorization service for banking app"
+```
+
+Recorded results for the three required pairs live in
+`app/embedding_pipeline/SANITY_CHECK.md` (A 0.5957, B 0.1920, C 0.5407).
+Note that Pair A sits just below the 0.6 rule of thumb and Pair C (generic text)
+lands almost as high — both are discussed in that file.
+
+Embeddings need **`OPENAI_API_KEY`**; a DeepSeek-only deployment still serves
+every other flow, and this endpoint returns a clear 500.
+
+## Data ingestion (Session 7, extension)
+
+`app/ingestion/` turns a corpus of historical documents into clean, validated,
+pseudonymized `Document`s, under the control of a versioned catalog. It is not
+part of the Session-7 brief; it is the reference project's data-driven phase,
+added here on request.
+
+**The catalog is the trust boundary.** `data/catalog/catalog.yaml` lists every
+source with a quality score, a sensitivity assessment and an explicit decision:
+`include`, `review` or `exclude`. Anything that is not `include` is rejected, and
+the rejection carries the written reason.
+
+```shell
+POST /api/v1/ingestion/runs
+{"source_name": "presupuestos_json"}
+→ 202 {"job_id": "<uuid>", "source_name": "presupuestos_json", "status": "pending"}
+
+GET /api/v1/ingestion/jobs/{job_id}
+→ 200 {"status": "completed", "documents_count": 3, ...}
+```
+
+Unknown source → `404`. A `review` or `exclude` source → `400` with the decision
+and its reason. The run itself is a background task; poll the job for its status.
+
+**The run does more than parse.** In order: catalog check → load → parse → clean
+and validate the raw JSON records → drop discarded and quarantined rows →
+pseudonymize when the catalog marks the source `has_pii` → count. That ordering is
+deliberate: the reference project shipped cleaning and pseudonymization as demos
+that never touched real data.
+
+With the seed corpus: 6 records parsed → 5 rows after dedup → **3 documents**;
+the negative-amount budget is discarded, the `TBD` client row is quarantined, and
+9 PII entities are pseudonymized.
+
+**Storage.** Two tables, `ingestion_jobs` and `pseudonym_mappings`. Parsed
+documents are counted, not stored — persistence of documents and vectors is a
+later phase. Compose runs Postgres (`pgvector/pgvector:pg16`, host port 5433);
+otherwise `DATABASE_URL` defaults to a SQLite file at `var/estimator.db`, so tests
+and a plain `uvicorn` run need no database.
+
+```shell
+uv run alembic upgrade head          # create the two tables
+uv run python -m app.ingestion.architecture   # CAG vs RAG decision, for Proyecto 2
+```
+
+**PII ships with the Spanish model.** `es-core-news-md` is a pinned dependency
+(a wheel from the spaCy model releases, declared in `pyproject.toml`), so
+`uv sync` and the image build install it — there is no manual download step.
+If it is ever missing, the service falls back to a regex analyzer that finds
+emails, budget ids and client codes but **not person names**. Set
+`PII_ANALYZER_MODE=presidio` to fail closed instead of degrading.
+
+Redaction is deliberately narrow: only `PERSON`, `EMAIL_ADDRESS`,
+`PHONE_NUMBER`, `LOCATION`, `BUDGET_ID` and `CLIENT_CODE` are replaced. Dates,
+amounts and phases are left intact — they are the data the estimator reads, not
+personal identifiers.
+
+**Database.** Compose runs Postgres and applies migrations on boot:
+
+```shell
+docker compose up -d postgres
+docker compose exec api alembic upgrade head     # done automatically on api start
+```
+
+To replay the repository tests against Postgres instead of SQLite:
+
+```shell
+$env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
+uv run pytest tests/test_ingestion_persistence.py tests/test_ingestion_postgres.py -q
+```
+
 ## Memory, audience tiers and Actor-Critic-Boss (Session 6)
 
 Three features extend the conversational flow past the plain sliding window.

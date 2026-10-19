@@ -5,7 +5,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import estimations, sessions
+from app.embedding_pipeline.router import router as embeddings_router
+from app.ingestion.startup import validate_catalog_at_startup
+from app.routers import estimations, ingestion, sessions
 
 
 def configure_logging() -> None:
@@ -39,6 +41,10 @@ async def lifespan(app: FastAPI):
     configure_logging()
     log = structlog.get_logger()
     settings = get_settings()
+    # A malformed catalog aborts a production boot and is logged elsewhere
+    # (spec 011, Q17). The router still raises on first use, so a development
+    # typo is delayed, never silent.
+    validate_catalog_at_startup(settings)
     log.info("application_started", environment=settings.APP_ENV)
     yield
     log.info("application_shutdown")
@@ -63,6 +69,8 @@ app.add_middleware(
 
 app.include_router(estimations.router)
 app.include_router(sessions.router)
+app.include_router(embeddings_router)
+app.include_router(ingestion.router)
 
 
 @app.get("/health")

@@ -48,6 +48,18 @@ app/guardrails/input.py        moderation + prompt-injection + PII checks
 app/guardrails/output.py       enforce_scope_response low-confidence filter
 app/context/examples.py        reference examples for the LEGACY flows
 app/prompts/loader.py          Jinja2 loader; prompts live at <use_case>/<version>/<role>.j2
+app/embedding_pipeline/        Session 7 embeddings: schemas, chunker, embedder, router, SANITY_CHECK.md
+app/ingestion/                 Session 7 (extension) data ingestion: catalog, parsers, cleaning, pii, orchestrator, architecture
+app/persistence/               Session 7 (extension) SQLAlchemy models + repositories (jobs, pseudonym mappings)
+app/routers/ingestion.py       POST /api/v1/ingestion/runs + GET /api/v1/ingestion/jobs/{id}
+app/schemas/ingestion.py       ingestion HTTP request/response shapes
+scripts/compare.py             cosine similarity CLI for the embedding sanity check
+data/budgets_sample.json       15 normalized budgets -> 52 chunks (Track B)
+data/catalog/catalog.yaml      audited sources with include/review/exclude decisions (Track A)
+data/seed/                     budgets, transcripts and the excluded rate card (Track A)
+alembic/                       one migration: pseudonym_mappings + ingestion_jobs
+docs/                          architecture, stack, flows, data model, operations, glossary, decisions
+rules/                         development, API, testing, QA, security and documentation rules
 app/prompts/estimation/v1/     system.j2, user.j2, examples.j2  (the typed v1 flow)
 app/prompts/estimation/v2/     system.j2, user.j2  (conversational baseline; adds <project_metadata>)
 app/prompts/estimation/v3/     system.j2, user.j2  (v2 + <audience> tier block + <output_schema>; user adds <critic_feedback>)
@@ -97,6 +109,9 @@ other two clients are run by hand.
 - `POST /sessions/{session_id}/estimate` — multipart form (transcript 20–80k chars + optional PDF/DOCX + optional `tier`) → `StructuredEstimationResponse` (with `observation`); 404 unknown session, 400 input guardrail, 415 unsupported attachment, 422 unreadable attachment / bad form field, 502 upstream
 - `POST /sessions/{session_id}/estimate-acb` — same contract, run through the Actor-Critic-Boss loop → `ACBResponse` (structured response + `acb: BossTrace`)
 - `GET /sessions/{session_id}` — session metadata + history length + `anchors_count`, `summary_chars`, `last_resolved_tier`, `last_tier_rule`, and the memory itself (`summary` text + `anchor_texts`)
+- `POST /embeddings/ingest` — `{budgets: [...]}` → `{chunks: [EmbeddedChunk], stats}`. **Note the prefix**: it is `/embeddings`, not `/api/v1`, because the Session-7 brief mandates that path. 422 on validation/caps, 500 generic when no OpenAI key or the provider fails
+- `POST /api/v1/ingestion/runs` — `{source_name}` → **202** `{job_id, source_name, status}`; unknown source → 404, `review`/`exclude` source → 400
+- `GET /api/v1/ingestion/jobs/{job_id}` — job status, document count, error, timestamps; 404 if unknown
 - `GET /health`, `GET /docs`, `GET /redoc`
 
 ## Run and verify
@@ -304,3 +319,92 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     and `anchor_texts` were added so the stress exercise's `MemoryDriftMetric` can
     search what the session actually remembers. It is a debug endpoint, so the full
     text is acceptable.
+29. **`/embeddings/ingest` sits outside `/api/v1` on purpose.** The Session-7 brief
+    mandates that exact path, so the route is `/embeddings/ingest` while the rest of
+    the estimation surface is `/api/v1/...`. Do not "fix" it into the versioned
+    namespace; the grader and the live session call the documented path.
+30. **The embedding endpoint needs `OPENAI_API_KEY`.** The service is otherwise
+    DeepSeek-first, so a deployment without an OpenAI key serves every other flow
+    and returns a generic 500 (`"Embedding service is not available."`) here. The
+    reason is logged; the response never carries it.
+31. **Embedding cost has its own constant.** `embedder.PRICE_PER_MILLION_TOKENS_USD
+    = 0.02` is separate from `llm_wrapper.MODEL_COSTS` (chat completions). Do not
+    merge them; the units and the models differ.
+32. **`token_count` is exact only for the OpenAI `text-embedding-3-*` tokenizer.**
+    `chunker.TOKENIZER_MODEL` is pinned; changing `EMBEDDING_MODEL` to another
+    provider makes the counts indicative, not exact.
+33. **`tiktoken` resolves its encoding lazily, on purpose.** `chunker._encoding()`
+    is `lru_cache`d and called per chunk, so importing the module never touches the
+    network. In a clean container or CI the first call downloads the BPE file once.
+    A module-level `encoding_for_model(...)` would make test collection depend on
+    that download.
+34. **The embedding pipeline persists nothing.** Vectors are returned in the
+    response and discarded; `POST /embeddings/ingest` writes no row, touches no
+    Redis key and records nothing in the usage ledger. Persistence is the retrieval
+    phase.
+35. **The embedding API can return fewer vectors than it was given.** The reference
+    `zip`ped silently and dropped chunks; `embedder.embed_many` raises
+    `EmbeddingCountMismatchError` instead, because attaching vectors by position
+    after a short response would silently mislabel every later chunk.
+36. **`app.persistence.database._LOCK` is an `RLock` on purpose.**
+    `get_session_factory` holds it while calling `get_engine`, which acquires it
+    again. With a plain `threading.Lock` the first HTTP request that builds a
+    session factory deadlocks forever — while a direct `get_engine` call works
+    fine, which is why every unit test passed. Do not "simplify" it back; the
+    regression test has a 10 s join timeout so a revert fails instead of hanging.
+37. **Ingestion persists jobs and pseudonym mappings, not documents.** A completed
+    run records a count in `ingestion_jobs`; the parsed `Document`s are discarded.
+    Retrieval needs a document table, which is a later phase. Quarantined and
+    discarded records never reach the document stream at all.
+38. **Cleaning only runs for JSON sources.** `ingest_source` calls the cleaner when
+    the format is `json` and the parser retained a raw record. TXT sources are parsed
+    and pseudonymized, never validated as records — there is no TXT schema.
+39. **A `has_pii` source fails closed without a pseudonymizer.** The orchestrator
+    raises `PseudonymizationRequired` rather than emit plaintext. Tests inject a
+    stub; the router injects the real one.
+40. **The Spanish spaCy model is a pinned dependency, not a download step.**
+    `es-core-news-md @ https://github.com/explosion/spacy-models/…/es_core_news_md-3.8.0-py3-none-any.whl`
+    is declared in `pyproject.toml`, so `uv sync` and the image build install it.
+    It is 40 MB and resolves from GitHub releases, not PyPI. Without it Presidio
+    misses Hispanic names and `PII_ANALYZER_MODE=auto` degrades to the regex
+    fallback (emails, `BUDGET_ID`, `CLIENT_CODE` — **no `PERSON`**). Set the mode
+    to `presidio` to fail closed instead of degrading.
+41. **Ingestion error bodies are flat, not nested under `detail`.**
+    `{"reason": "unknown_source"}` and friends come from explicit `JSONResponse`
+    calls, because spec 011 promises that shape. The estimation routers use
+    FastAPI's default `{"detail": ...}`. Both are deliberate.
+42. **The ingestion run is a BackgroundTask, so its failure is invisible to the
+    caller.** The request has already returned 202. The job row becomes `failed`
+    with a truncated message (up to 2048 chars of exception text — an
+    operator-facing path leak that is accepted residual risk).
+43. **`DATABASE_URL` defaults to SQLite at `var/estimator.db`.** Compose overrides
+    it with Postgres; `var/` is gitignored. The SQL uses portable SQLAlchemy
+    constructs (`Uuid`, `DateTime(timezone=True)`, select-then-insert), so no
+    `pg_insert` or `postgresql.UUID` is involved — that is what lets the suite run
+    without a database.
+44. **Two budget formats exist and are not interchangeable.**
+    `data/budgets_sample.json` (`client_metadata`, `components`) feeds the
+    embedding pipeline; `data/seed/budgets/*.json` (`client_name`, `total_amount`,
+    `phases`) feeds ingestion. Never pass one to the other's parser.
+45. **PII redaction uses an explicit entity allow-list.**
+    `pseudonymizer.DEFAULT_ENTITIES` is `PERSON`, `EMAIL_ADDRESS`,
+    `PHONE_NUMBER`, `LOCATION`, `BUDGET_ID`, `CLIENT_CODE`. Presidio's Spanish
+    NER also emits `DATE_TIME` (0.60 on `2024-02-14`) and `URL`; redacting those
+    replaced signed dates and amounts with `REDACTED-…` — data loss dressed as
+    privacy. The list is enforced twice: passed to the analyzer *and* applied to
+    the returned spans, so an analyzer that ignores the filter cannot cause it.
+46. **Span selection is `(start, -score, -length)`, not `(start, -end)`.**
+    Presidio tags short all-caps identifiers as `PERSON` as well
+    (`CLI-0078` → `CLIENT_CODE` 0.95 and `PERSON` 0.85). Ordering by position
+    alone made the winner depend on the analyzer's output order, so a person
+    pseudonym could overwrite a client code. The specific recognizer must win,
+    deterministically.
+47. **`TEST_DATABASE_URL` replays the repository tests on a real database.**
+    The default suite is SQLite and needs no service; set
+    `TEST_DATABASE_URL=postgresql+psycopg://estimator:estimator@localhost:5433/estimator`
+    to run `tests/test_ingestion_persistence.py` against Postgres, and the
+    `postgres`-marked `tests/test_ingestion_postgres.py` only runs when it is
+    set. The SQLite run alone cannot catch a dialect assumption.
+48. **Compose runs migrations on boot.** The `api` command is
+    `alembic upgrade head && uvicorn …`, so a schema error surfaces as a
+    container that never becomes healthy rather than a 500 on first request.

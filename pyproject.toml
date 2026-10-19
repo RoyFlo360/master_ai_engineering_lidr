@@ -13,7 +13,27 @@ dependencies = [
     "instructor",
     "jinja2>=3.1.6",
     "litellm>=1.83.0",
-    "openai<3.13",
+    "openai>=1.0.0,<3.13",
+    # Session 7 — embedding pipeline: token counting for the structural chunker.
+    "tiktoken>=0.7.0",
+    # Session 7 — data ingestion: catalog, cleaning, PII, persistence.
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "pandas>=2.2",
+    "pandera>=0.20",
+    "openpyxl>=3.1",
+    "faker>=24.0",
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+    "spacy>=3.7",
+    # Spanish NER model. spaCy models are not on PyPI as importable packages, so
+    # this is a pinned wheel from the explosion releases. Without it Presidio
+    # silently misses Hispanic names and ingestion degrades to the regex
+    # fallback (emails/ids only, never PERSON). Declared here — rather than left
+    # as a `spacy download` step — so the host venv, CI and the image all get it.
+    "es-core-news-md @ https://github.com/explosion/spacy-models/releases/download/es_core_news_md-3.8.0/es_core_news_md-3.8.0-py3-none-any.whl",
     "pydantic-settings>=2.15.0",
     "pypdf>=6.19.0",
     "python-docx>=1.2.0",
@@ -44,3 +64,6 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra"
+markers = [
+    "postgres: needs a real database via TEST_DATABASE_URL (skipped otherwise)",
+]

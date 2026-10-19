@@ -74,6 +74,29 @@ class Settings(BaseSettings):
     SEMANTIC_CACHE_TTL: int = 86400
     SEMANTIC_CACHE_LOG_ONLY: bool = False
 
+    # Session 7 (extension) — data ingestion: catalog, cleaning, PII, persistence.
+    # Paths are resolved from the project root, never from the process working
+    # directory: the container runs from /srv/app and a host run may not.
+    # DATABASE_URL defaults to SQLite so the test suite and a laptop run need no
+    # database; docker-compose overrides it with Postgres for the heavier runs.
+    DATABASE_URL: str = (
+        f"sqlite:///{(Path(__file__).resolve().parent.parent / 'var' / 'estimator.db').as_posix()}"
+    )
+    # Where the YAML catalog lives.
+    CATALOG_PATH: Path = Path(__file__).resolve().parent.parent / "data" / "catalog" / "catalog.yaml"
+    # Root that ``CatalogSource.location`` entries are resolved against.
+    INGESTION_DATA_ROOT: Path = Path(__file__).resolve().parent.parent / "data" / "seed"
+    # Presidio/spaCy model used for Spanish PII detection.
+    PRESIDIO_SPACY_MODEL: str = "es_core_news_md"
+    # PII analyzer: "auto" uses Presidio when the spaCy model is installed and
+    # degrades to the regex fallback otherwise; "presidio"/"regex" force one.
+    PII_ANALYZER_MODE: Literal["auto", "presidio", "regex"] = "auto"
+    # Locale used by Faker to generate consistent pseudonyms.
+    PSEUDONYM_FAKER_LOCALE: str = "es_ES"
+    # HMAC salt for the pseudonym mapping. Rotating it invalidates every prior
+    # mapping — that is the GDPR Art. 17 lever. CHANGE IN PRODUCTION.
+    PSEUDONYM_HASH_SALT: str = "change-me-in-prod"
+
     @property
     def llm_api_key(self) -> str | None:
         """Credential for the configured provider.

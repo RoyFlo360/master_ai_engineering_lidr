@@ -23,6 +23,10 @@ evals/stress/results*.csv
 evals/stress/smoke.csv
 evals/stress/*.log
 
+# Local SQLite database (the default DATABASE_URL); compose uses Postgres instead
+var/
+*.db
+
 # OS files
 .DS_Store
 

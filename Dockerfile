@@ -21,6 +21,13 @@ RUN uv sync --frozen --no-install-project
 COPY app/ ./app/
 COPY streamlit_app.py streamlit_app_estimation_api.py ./
 COPY .streamlit/ ./.streamlit/
+# Session 7: the container needs the CLI scripts, the sample/seed data and the
+# migration environment. docker-compose bind-mounts the repo anyway; these
+# COPYs keep a standalone image functional.
+COPY scripts/ ./scripts/
+COPY data/ ./data/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
 
 EXPOSE 8000 8501
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
