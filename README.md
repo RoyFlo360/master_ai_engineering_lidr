@@ -241,10 +241,38 @@ to 100 chunks per request and retries only rate limits (1s/2s/4s).
 POST /embeddings/ingest
 {"source_path": "data/budgets_sample.json::BUD-2024-001",
  "document_type": "historical_budget",
- "content": <Budget>}
+ "content": <Budget>,
+ "pseudonymize": false}
 → 200 {"document_id": 1, "chunks_created": 4,
-        "embedding_dimension": 1536, "ingestion_time_ms": 412}
+        "embedding_dimension": 1536, "ingestion_time_ms": 412,
+        "entities_pseudonymized": 0}
 → 409 {"detail": "Document already ingested", "document_id": 1}
+```
+
+**`pseudonymize` is optional and off by default.** Set it to `true` and every
+chunk's text is passed through the PII pseudonymizer *before* it is embedded, so
+names, emails, phone numbers, locations, budget ids and client codes never reach
+Postgres in plaintext. Design notes:
+
+- It changes the stored text, therefore the embeddings and the search distances.
+  That is why it is opt-in: flipping it on for an existing corpus silently
+  invalidates every vector you stored without it.
+- `chunk_id` and `metadata` are **not** touched, so a pseudonymized hit is still
+  traceable to its budget and component.
+- Pseudonyms are **stable**: the same value yields the same pseudonym across
+  requests and processes (seeded from an HMAC of the value plus
+  `PSEUDONYM_HASH_SALT`). Rotating the salt changes all of them.
+- It is **strict boolean** — `"yes"` is a 422, not a guess.
+- It **fails closed**: if the flag is set and the pseudonymizer cannot run, the
+  request is refused (`503`) and nothing is written. It never falls back to
+  storing plaintext.
+
+```shell
+# bash: same request with the flag on
+curl -s -X POST http://localhost:8000/embeddings/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"source_path":"x::1","document_type":"historical_budget",
+       "content":{...},"pseudonymize":true}'
 ```
 
 One request is **one document**, written with its chunks in a single transaction:
@@ -264,7 +292,8 @@ POST /search
 `distance` is **cosine distance** (lower = more similar), ascending. `422` for a
 bad body or `k` outside `1..50`; an empty corpus is a `200` with `results: []`;
 `500` with a generic body when the service cannot run (no `OPENAI_API_KEY`, a
-non-Postgres `DATABASE_URL`, or a mismatched embedding model). Details go to the
+non-Postgres `DATABASE_URL`, or a mismatched embedding model), and `503` when
+`pseudonymize` is set but no pseudonymizer is configured. Details go to the
 log, never the response.
 
 ### Four schema decisions worth defending

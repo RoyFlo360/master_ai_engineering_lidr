@@ -29,6 +29,7 @@ from app.embedding_pipeline.analysis.comparison import (
 from app.embedding_pipeline.embedder import OpenAIEmbedder
 from app.embedding_pipeline.ingest_service import (
     DuplicateDocumentError,
+    PseudonymizationUnavailable,
     RagIngestService,
 )
 from app.embedding_pipeline.schemas import IngestRequest, IngestResponse
@@ -63,13 +64,27 @@ async def ingest(
         "embeddings_ingest_received",
         source_path=request.source_path,
         document_type=request.document_type,
+        pseudonymize=request.pseudonymize,
     )
     try:
         return await service.ingest(
             source_path=request.source_path,
             document_type=request.document_type,
             budget=request.content,
+            pseudonymize=request.pseudonymize,
         )
+    except PseudonymizationUnavailable as exc:
+        # A configuration gap, not a client error: the caller asked for PII
+        # protection the deployment cannot provide. Never fall back to storing
+        # plaintext.
+        log.error(
+            "embeddings_ingest_failed",
+            reason="pseudonymizer_unavailable",
+            source_path=request.source_path,
+        )
+        raise HTTPException(
+            status_code=503, detail="Pseudonymization is not available."
+        ) from exc
     except DuplicateDocumentError as exc:
         # JSONResponse (not HTTPException) to keep the exercise's literal
         # top-level shape: {"detail": ..., "document_id": ...}.

@@ -33,14 +33,14 @@ uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost
 ```
 
 The suite is hermetic: it reads no `.env`, reaches no provider, and needs no Redis or
-database. Measured today: **639 passed, 18 skipped** — the skips are the opt-in
+database. Measured today: **659 passed, 18 skipped** — the skips are the opt-in
 Postgres modules (10 ingestion, 8 vector store).
 
 To replay the persistence tests against a real database:
 
 ```shell
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
-uv run pytest -q                               # 657 passed, 0 skipped
+uv run pytest -q                               # 677 passed, 0 skipped
 ```
 
 ### Docker
@@ -234,6 +234,25 @@ docker compose exec -T postgres psql -U estimator -d estimator `
   -c "select count(*) as chunks from chunks;"
 ```
 
+**With pseudonymization on.** Add `"pseudonymize": true` to the body. The
+response then reports how many spans were replaced:
+
+```powershell
+$body.pseudonymize = $true
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/embeddings/ingest `
+  -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 20)
+# -> entities_pseudonymized: 3   (0 when the flag is off or nothing was found)
+```
+
+Verify in the database that the plaintext is gone:
+
+```shell
+docker compose exec -T postgres psql -U estimator -d estimator -c "select content from chunks order by id desc limit 1;"
+```
+
+Remember it changes the embeddings, so re-ingesting a corpus with the flag
+produces different search distances than ingesting it without.
+
 ### 3. Search the corpus
 
 ```powershell
@@ -342,10 +361,10 @@ uv run pytest tests/test_embedding_schemas.py tests/test_embedding_chunker.py `
   tests/test_embedding_performance.py tests/test_embedding_security.py `
   tests/test_compare_cli.py -q            # 90 passed
 
-uv run pytest -q                          # 639 passed, 18 skipped
+uv run pytest -q                          # 659 passed, 18 skipped
 
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
-uv run pytest -q                          # 657 passed, 0 skipped
+uv run pytest -q                          # 677 passed, 0 skipped
 ```
 
 ## Where the artifacts are

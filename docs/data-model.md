@@ -223,12 +223,19 @@ embedded. `chunk_id` is the traceable corpus id — **not** the database id.
 
 ```text
 IngestRequest{source_path (≤512, no control chars), document_type (≤50),
-              content: Budget}
-IngestResponse{document_id, chunks_created, embedding_dimension, ingestion_time_ms}
+              content: Budget, pseudonymize: StrictBool = False}
+IngestResponse{document_id, chunks_created, embedding_dimension,
+               ingestion_time_ms, entities_pseudonymized = 0}
 ```
 
 One request is one document. `source_path` is provenance and the uniqueness key,
 not a file that is read.
+
+`pseudonymize` is a `StrictBool`: `"yes"` is a 422, not a coercion. Turning it on
+rewrites each chunk's `text` before embedding and recomputes `token_count`
+(pseudonyms differ in length); `chunk_id` and `metadata` are unchanged.
+`entities_pseudonymized` counts the spans replaced, so the caller can tell that
+the flag did something.
 
 ### `SearchRequest` / `SearchHit` / `SearchResponse` — `POST /search`
 

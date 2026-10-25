@@ -202,6 +202,25 @@ def vector_store_problem() -> str | None:
     return None
 
 
+def get_pseudonymizer():
+    """Build a pseudonymizer for one ingest request.
+
+    Deliberately **not** ``lru_cache``d: ``ConsistentPseudonymizer`` owns a Faker
+    instance and ``seed_instance`` mutates it, so sharing one across concurrent
+    requests would race. Construction is cheap because ``build_analyzer``
+    caches the Presidio engine per model.
+
+    The mapping store is in-memory. Pseudonyms are still stable across requests
+    and processes because the factory seeds Faker from the HMAC of the value, so
+    the same (salt, value) pair always yields the same pseudonym. What an
+    in-memory store does *not* give you is a durable, auditable mapping — for
+    that, wire ``PostgresMappingStore`` with a session here.
+    """
+    from app.ingestion.pii import InMemoryMappingStore, build_pseudonymizer
+
+    return build_pseudonymizer(get_settings(), InMemoryMappingStore())
+
+
 @lru_cache
 def get_chunk_store() -> ChunkStore:
     """Stateless async data-access layer over documents/chunks."""
@@ -228,6 +247,7 @@ def get_rag_ingest_service() -> RagIngestService | None:
         embedder=embedder,
         session_factory=get_async_session_factory(),
         store=get_chunk_store(),
+        pseudonymizer_factory=get_pseudonymizer,
     )
 
 

@@ -15,6 +15,10 @@ Scope, deliberately narrow to avoid false positives:
   identifiers are ignored. A trailing `::function` is stripped before resolving.
 - Fenced code blocks are not scanned: they hold commands and shell paths, not
   repository references.
+- `EXCLUDED_DOC_DIRS` is skipped entirely. It currently holds one entry,
+  `docs/instrucctions-missing/`, an untracked archive of the session briefs and
+  gap analyses. Those files quote another project's layout, so their links are
+  not claims about this repository.
 
 It cannot prove the prose is true; that remains the author's job.
 """
@@ -31,6 +35,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DOC_FOLDERS = ("docs", "rules")
 DOCS_DIR = REPO_ROOT / "docs"
 SPECS_DIR = REPO_ROOT / "specs"
+
+#: Trees under ``docs/`` that hold archived material rather than live
+#: documentation, and are therefore not scanned for link targets.
+#:
+#: ``docs/instrucctions-missing/`` keeps the per-session briefs and gap analyses
+#: (``instructions_session*.md``, ``MISSING-session*.md``) in one untracked place.
+#: They are a record of what was *asked of the reference project*, so they cite
+#: paths such as ``ai-engineering/estimator/README.md`` and
+#: ``embedding_pipeline/chunker.py`` that do not exist in this repository on
+#: purpose. Scanning them would assert that an archive of another project's
+#: layout matches ours — a test that can only ever fail.
+EXCLUDED_DOC_DIRS = ("docs/instrucctions-missing",)
 
 # [text](target) — images (![alt](src)) are excluded: there are none, and their
 # targets are assets rather than documents.
@@ -75,8 +91,19 @@ def _markdown_files() -> list[Path]:
     for folder in DOC_FOLDERS:
         root = REPO_ROOT / folder
         if root.is_dir():
-            files.extend(sorted(root.rglob("*.md")))
+            files.extend(
+                path for path in sorted(root.rglob("*.md")) if not _is_excluded(path)
+            )
     return files
+
+
+def _is_excluded(path: Path) -> bool:
+    """True when ``path`` sits inside an archived (non-live) documentation tree."""
+    relative = _display(path)
+    return any(
+        relative == excluded or relative.startswith(excluded + "/")
+        for excluded in EXCLUDED_DOC_DIRS
+    )
 
 
 def _display(path: Path) -> str:
@@ -207,6 +234,7 @@ def test_folder_readme_links_every_file(folder: str) -> None:
         _display(path)
         for path in sorted(root.rglob("*.md"))
         if not (path.parent == root and path.name == "README.md")
+        and not _is_excluded(path)
         and path.resolve() not in linked
     ]
     assert not missing, f"{folder}/README.md does not link: " + ", ".join(missing)

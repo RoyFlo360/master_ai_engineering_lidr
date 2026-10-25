@@ -23,13 +23,13 @@ Update the document in the same change (`rules/documentation.md`).
 | --- | --- |
 | The system in ten minutes: containers, components, request paths | [architecture.md](architecture.md) |
 | Which library does what, and what breaks without it | [technologies.md](technologies.md) |
-| To trace one endpoint end to end, or tell the five flows apart | [data-flows.md](data-flows.md) |
+| To trace one endpoint end to end, or tell the nine flows apart | [data-flows.md](data-flows.md) |
 | A model's fields, bounds and validators | [data-model.md](data-model.md) |
 | To run, test, evaluate, stress or debug the service | [operations.md](operations.md) |
 | To decode CAG, ACB, anchor, tier, observation or cache-hit kind | [glossary.md](glossary.md) |
 | To know why something is the way it is, and where that was decided | [decisions.md](decisions.md) |
 | To know the conventions a change must follow | [rules/README.md](../rules/README.md) |
-| The agent-facing orientation and its 28 gotchas | [AGENTS.md](../AGENTS.md) |
+| The agent-facing orientation and its 66 gotchas | [AGENTS.md](../AGENTS.md) |
 
 ## Conventions in these files
 
@@ -39,5 +39,7 @@ Update the document in the same change (`rules/documentation.md`).
 - Paths in backticks are real repository paths. `tests/test_docs_links.py` checks
   the repo-relative Markdown links and the inline backticked paths that carry a file
   extension; renaming one of those fails the suite. Directory names and fenced code
-  blocks are not validated.
+  blocks are not validated. `docs/instrucctions-missing/` is excluded from the
+  scan: it is an untracked archive of the session briefs and gap analyses, and
+  those cite the reference project's paths, not this repository's.
 - No file here claims a capability that the code does not have.

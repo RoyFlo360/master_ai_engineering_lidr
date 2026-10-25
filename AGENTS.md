@@ -74,7 +74,7 @@ streamlit_app_estimation_api.py  JSON client for /estimate
 streamlit_app_loader.py        two-tab client: typed /new-estimate + conversational /sessions — the one compose runs
 evals/                         golden-set harness: dataset.py, metrics.py, run.py (CLI), golden_dataset.json (16 cases)
 evals/stress/                  Session-6 stress harness: scenarios.py, metrics.py, run.py, analyze.py, fixtures/build_pdfs.py, REPORT.md
-tests/                         hermetic pytest suite (639 passing today + 18 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
+tests/                         hermetic pytest suite (659 passing today + 18 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
 specs/                         spec-driven decisions, numbered 001–013; README.md explains the convention. 012 is Implemented, 013 is Implemented for the chunking lab with runtime model config deferred
 MISSING-session{6,7,8}.md      gap analyses vs. the reference `ai-engineering/estimator` project, one per session
 Dockerfile                     python:3.14-slim; uv sync --frozen --no-install-project; one image serves both api and streamlit
@@ -112,7 +112,7 @@ other two clients are run by hand.
 - `POST /sessions/{session_id}/estimate` — multipart form (transcript 20–80k chars + optional PDF/DOCX + optional `tier`) → `StructuredEstimationResponse` (with `observation`); 404 unknown session, 400 input guardrail, 415 unsupported attachment, 422 unreadable attachment / bad form field, 502 upstream
 - `POST /sessions/{session_id}/estimate-acb` — same contract, run through the Actor-Critic-Boss loop → `ACBResponse` (structured response + `acb: BossTrace`)
 - `GET /sessions/{session_id}` — session metadata + history length + `anchors_count`, `summary_chars`, `last_resolved_tier`, `last_tier_rule`, and the memory itself (`summary` text + `anchor_texts`)
-- `POST /embeddings/ingest` — one document per request: `{source_path, document_type, content: <Budget>}` → `{document_id, chunks_created, embedding_dimension, ingestion_time_ms}`. Persists the document and its chunks in one transaction. Duplicate `source_path` → **409** with a top-level `{"detail": "Document already ingested", "document_id": N}`. 422 on validation, 500 generic when there is no OpenAI key, `DATABASE_URL` is not Postgres, or `EMBEDDING_MODEL` is not the 1536-dim model. **Prefix**: `/embeddings`, not `/api/v1`
+- `POST /embeddings/ingest` — one document per request: `{source_path, document_type, content: <Budget>, pseudonymize?: bool}` → `{document_id, chunks_created, embedding_dimension, ingestion_time_ms, entities_pseudonymized}`. `pseudonymize` (default `false`, strict boolean) rewrites each chunk's text through the PII pseudonymizer before embedding; `503` if it is set and no pseudonymizer is wired. Persists the document and its chunks in one transaction. Duplicate `source_path` → **409** with a top-level `{"detail": "Document already ingested", "document_id": N}`. 422 on validation, 500 generic when there is no OpenAI key, `DATABASE_URL` is not Postgres, or `EMBEDDING_MODEL` is not the 1536-dim model. **Prefix**: `/embeddings`, not `/api/v1`
 - `POST /embeddings/compare` — `{budgets, queries, strategies, top_k}` → `{stats_per_strategy, queries_per_strategy}`. Runs the eight chunkers over the same corpus and returns token stats plus top-k cosine per query. **Persists nothing.** 400 unknown strategy, 500 when a strategy's provider key is missing, 422 on the body. The three paid strategies (`semantic`, `propositional`, `contextual_retrieval`) bill during *ingestion*
 - `POST /search` — `{query, k}` (k 1–50, default 5) → `{query, k, search_time_ms, results[{chunk_id, document_id, chunk_type, content, distance, metadata}]}`. k-NN by cosine distance in SQL; sequential scan, no index. Empty corpus → 200 with `results: []`; 422 on bounds; 500 generic on failure. **Prefix**: unversioned, like `/embeddings`
 - `POST /api/v1/ingestion/runs` — `{source_name}` → **202** `{job_id, source_name, status}`; unknown source → 404, `review`/`exclude` source → 400
@@ -473,3 +473,19 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
 66. **A missing provider key makes a strategy "not run", not a crash.** The CLI
     records it in the report's *Strategies not run* table; the HTTP route returns
     500 for the whole request instead.
+
+67. **`pseudonymize` is opt-in and changes the stored text.** Turning it on
+    rewrites chunk text before embedding, so embeddings and search distances for
+    that document no longer match a corpus ingested without it. It is off by
+    default for exactly that reason. `chunk_id` and `metadata` are untouched, so
+    traceability survives.
+68. **Pseudonymization fails closed on the ingest path.** Flag set and no
+    pseudonymizer configured → `PseudonymizationUnavailable` → **503**, nothing
+    written. Any analyzer error → 500 and rollback. It never degrades to storing
+    plaintext; `tests/test_embedding_pseudonymization.py` pins both.
+69. **Pseudonyms are stable without a durable mapping store.** The Faker
+    generator is seeded from the HMAC of the value, so the same (salt, value)
+    pair yields the same pseudonym in any process. The in-memory store therefore
+    does not break consistency — but it does mean the mapping is not auditable.
+    Wire `PostgresMappingStore` in `get_pseudonymizer` if you need Art. 17
+    `forget` to work per value.

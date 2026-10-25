@@ -85,12 +85,25 @@ the auxiliary-model fallback.
   redacting it. A rejection is a 400, not a sanitized request.
 - The conversational flow sends transcripts to third-party providers. There is no
   local retention, but there is also no redaction beyond the regex layer.
-- Retrieval and indexing are `PLANNED — not yet implemented`. The ingestion spec (011)
-  requires that when a source has PII, the document text is pseudonymized before it
-  would be indexed, and that the mapping store holds HMAC digests and generated
-  pseudonyms — **never the plaintext value**. Any implementation must enforce that:
-  a mapping table containing the original name, email or code is a defect, not a
-  trade-off.
+- **Retrieval is implemented** (`POST /search`) but **there is no vector index**:
+  retrieval is a sequential scan. Adding an index is `PLANNED — not yet
+  implemented`.
+- **The vector store can pseudonymize on ingest, and does not by default.**
+  `POST /embeddings/ingest` accepts `pseudonymize: true`, which rewrites each
+  chunk's text through the PII pseudonymizer *before* embedding, so neither the
+  stored `content` nor its vector holds the original value. It is opt-in because
+  it changes the embeddings and therefore search distances; the default stores
+  text verbatim. When it is on it **fails closed**: an analyzer error aborts the
+  transaction, and a deployment with no pseudonymizer returns 503 — the path
+  must never degrade to storing plaintext.
+- The catalog-driven ingestion run (spec 011) pseudonymizes independently and
+  discards its documents, so it never feeds the vector store. Two paths, one
+  corpus each; a document is protected only if it was ingested with the flag.
+- The mapping store holds HMAC digests and generated pseudonyms — **never the
+  plaintext value**. A mapping table containing the original name, email or code
+  is a defect, not a trade-off. The ingest path currently uses an in-memory
+  store, which keeps pseudonyms stable (they are seeded from the HMAC) but is not
+  auditable; wire `PostgresMappingStore` if per-value `forget` must work.
 - Do not add PII to tests. Use synthetic names and clearly fake values.
 
 ## Residual risks

@@ -108,11 +108,15 @@ formats for the UI; the pricing modules stay numeric.
 ## Deliberately absent
 
 - `unstructured`. The project does not parse arbitrary documents. Attachments are
-  `.pdf` and `.docx` only, through `pypdf` and `python-docx`, and the planned
-  ingestion parsers are JSON and TXT only. Adding `unstructured` would pull a large
-  dependency tree for formats the catalog does not include.
-- `numpy`/`scikit-learn` as declared dependencies. Cosine similarity in the planned
-  embedding script is computed with `math`; the only numeric use in the shipped code
+  `.pdf` and `.docx` only, through `pypdf` and `python-docx`, and the ingestion
+  parsers are JSON and TXT only. Adding `unstructured` would pull a large dependency
+  tree for formats the catalog does not include.
+- `numpy`/`scikit-learn` as declared dependencies. Cosine similarity is computed with
+  `math` in `app/embedding_pipeline/analysis/similarity.py` and `scripts/compare.py`,
+  and cosine *distance* is evaluated by Postgres (`<=>`); the only other numeric use
   is the semantic cache's float32 conversion.
-- Any web framework beyond FastAPI, any database driver in the running service, and
-  any task queue. The service is one process.
+- A vector index (HNSW/IVFFlat). The sequential scan is the deliberate baseline for
+  the live session to measure an index against (spec 012).
+- A task queue (Celery, RQ, arq). The ingestion run is a FastAPI `BackgroundTask` in
+  the same process; the vector store needs no background worker.
+- A web framework beyond FastAPI. The service is one process serving one app.

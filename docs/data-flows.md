@@ -230,8 +230,8 @@ text — there is no OCR step.
 ## 6. Embedding ingest — `POST /embeddings/ingest`
 
 **Entry.** `app/embedding_pipeline/router.py::ingest`, body
-`IngestRequest{source_path, document_type, content: Budget}` — **one document per
-request**.
+`IngestRequest{source_path, document_type, content: Budget, pseudonymize}` —
+**one document per request**. `pseudonymize` is optional and defaults to `false`.
 
 **Steps.**
 
@@ -241,10 +241,13 @@ request
   -> RagIngestService.ingest       one AsyncSession, one transaction
        1. find_document_id         409 when source_path is already ingested
        2. JSONStructuralChunker    one component = one Chunk (contextual header)
-       3. embed_many (in a thread) 100 chunks per call, rate-limit retries 1s/2s/4s
-       4. persist_document_with_chunks   documents row (flush) + chunks (add_all)
-       5. commit on scope exit
-  -> 200 {document_id, chunks_created, embedding_dimension, ingestion_time_ms}
+       3. pseudonymize? (optional) rewrite chunk TEXT via the PII pseudonymizer;
+                                   recompute token_count; chunk_id/metadata kept
+       4. embed_many (in a thread) 100 chunks per call, rate-limit retries 1s/2s/4s
+       5. persist_document_with_chunks   documents row (flush) + chunks (add_all)
+       6. commit on scope exit
+  -> 200 {document_id, chunks_created, embedding_dimension, ingestion_time_ms,
+          entities_pseudonymized}
 ```
 
 **State touched.** `documents` and `chunks` in Postgres, written atomically. No
@@ -261,10 +264,17 @@ index** on `documents.source_path` is the guarantee. A concurrent duplicate that
 slips past the check raises `IntegrityError`, which is re-read in a fresh session
 and mapped to the same `409` body.
 
+**Pseudonymization (opt-in).** With `pseudonymize: true`, the chunk text is
+rewritten *before* it is embedded, so neither the vector nor the stored `content`
+holds the original value. It changes the embeddings, which is why it is off by
+default. Failures abort the transaction: the path never degrades to storing
+plaintext (a missing pseudonymizer is a 503).
+
 **Failure modes.** 422 for validation; 500 `"Embedding service is not
 available."` when no `OPENAI_API_KEY`, a non-Postgres `DATABASE_URL`, or a
 non-1536 `EMBEDDING_MODEL`; 500 `"Failed to generate embeddings."` for a provider
-or database failure. Details go to the log only.
+or database failure; 503 `"Pseudonymization is not available."` when the flag is
+set and the deployment has no pseudonymizer. Details go to the log only.
 
 ## 7. Semantic search — `POST /search`
 
@@ -348,8 +358,10 @@ GET job -> status, documents_count, error_message, timestamps
 ```
 
 **State touched.** `ingestion_jobs` (one row per run) and, for a `has_pii`
-source, `pseudonym_mappings` (one row per distinct value). Documents are counted,
-not stored — that is a later phase.
+source, `pseudonym_mappings` (one row per distinct value). The parsed
+`Document` objects are counted and then discarded — this pipeline does not
+write them anywhere. The vector store's `documents` table is a different thing,
+fed by a different path (§6), and the two are not connected.
 
 **Seed corpus result.** `presupuestos_json` parses 6 records, keeps 3 documents,
 drops `BUDGET-2024-0004` (negative amount) and holds `BUDGET-2024-0003`

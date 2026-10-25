@@ -172,9 +172,11 @@ vectors that would make every later distance meaningless.
 ```
 {"source_path": "data/budgets_sample.json::BUD-2024-001",
  "document_type": "historical_budget",
- "content": <Budget>}
+ "content": <Budget>,
+ "pseudonymize": false}
 → 200 {"document_id": 1, "chunks_created": 4,
-        "embedding_dimension": 1536, "ingestion_time_ms": 412}
+        "embedding_dimension": 1536, "ingestion_time_ms": 412,
+        "entities_pseudonymized": 0}
 ```
 
 - **422** — Pydantic validation of `content` as a `Budget` (bad enum,
@@ -189,6 +191,31 @@ vectors that would make every later distance meaningless.
   `EMBEDDING_MODEL` is not the 1536-dim model; `{"detail": "Failed to generate
   embeddings."}` for any embedding or database failure. Reasons go to the log,
   never the response.
+- **503** — `{"detail": "Pseudonymization is not available."}` when
+  `pseudonymize` is `true` but the deployment has no pseudonymizer wired.
+
+### `pseudonymize` — optional PII protection (added 2026-10-25)
+
+`pseudonymize` is a `StrictBool` defaulting to `false`. When `true`, every
+chunk's text passes through `app.ingestion.pii.ConsistentPseudonymizer` before it
+is embedded, so the plaintext never reaches Postgres. Applied in
+`app/embedding_pipeline/pseudonymize.py::pseudonymize_chunks`, between chunking
+and embedding inside the same transaction.
+
+- **Opt-in, because it changes the text.** Pseudonyms differ in length, so the
+  chunk's tokens, its embedding and every distance it participates in change.
+  Enabling it for a corpus ingested without it silently invalidates those
+  vectors.
+- **`chunk_id` and `metadata` are untouched** — a pseudonymized hit is still
+  traceable to its budget and component.
+- **`token_count` is recomputed**, because a stale count would misreport batch
+  size and cost.
+- **Fails closed.** An analyzer error aborts the transaction; a missing
+  pseudonymizer is a 503. It never falls back to storing plaintext.
+- **Uses a protocol, not a hard import.** `pseudonymize.py` depends only on a
+  `pseudonymize(text)` shape; `app/dependencies.get_pseudonymizer` wires the real
+  Presidio-backed implementation (the composition root), keeping the two domain
+  packages decoupled and the default suite free of spaCy.
 
 Vectors no longer travel over HTTP. The Session-7 batch body
 (`{"budgets": [...]}`) now returns **422**; a test pins that, so a stale client
@@ -234,12 +261,12 @@ Indexes: `ix_documents_source_path` (unique), `ix_chunks_document_id`,
 
 Implemented 2026-10-24. Evidence:
 
-- **Hermetic suite** — `uv run pytest -q` → `639 passed, 18 skipped,
-  1 warning in 10.07s`. The 18 skips are the opt-in Postgres modules
+- **Hermetic suite** — `uv run pytest -q` → `659 passed, 18 skipped,
+  1 warning in 11.18s`. The 18 skips are the opt-in Postgres modules
   (10 ingestion, 8 vector store).
 - **With the real database** —
   `$env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator";
-  uv run pytest -q` → `613 passed, 1 warning in 12.59s`.
+  uv run pytest -q` → `613 passed, 1 warning in 11.43s`.
 - **Migration on Postgres** — `alembic upgrade head` against the compose
   database, then `\d documents` / `\d chunks`:
   `embedding | vector(1536)` nullable, `metadata | jsonb NOT NULL`,
@@ -277,6 +304,25 @@ Implemented 2026-10-24. Evidence:
   same model reproduce the reference project's distances to four decimals
   (`0.4108`, `0.4760`, `0.4982`, `0.5122`, `0.5258`), which is the strongest
   available evidence that the chunk text and the embedding path match.
+
+- **Optional pseudonymization (2026-10-25)** —
+  `tests/test_embedding_pseudonymization.py` (15 tests) plus five router tests in
+  `tests/test_embeddings_api.py`. They assert the properties, not the plumbing:
+  personal data is absent from the stored text with the flag on and present with
+  it off; dates, amounts, hours and component names survive (over-redaction
+  guard); `chunk_id`/`metadata` are preserved; `token_count` is recomputed; the
+  same value yields the same pseudonym across requests; a different salt yields a
+  different one; the mapping store receives only 64-char HMAC digests; an analyzer
+  failure raises instead of leaking; and an unwired pseudonymizer refuses with
+  `PseudonymizationUnavailable`. Three mutations were run to confirm the tests
+  bite: a no-op `pseudonymize_chunks` fails 7, ignoring the flag in the service
+  fails 2, dropping it in the router fails 2.
+- **End to end against the live stack (real Presidio, not the stub).** The same
+  budget with `pseudonymize: false` stored
+  `Escalation contact: laura.fernandez@acmebank.es` verbatim; with
+  `pseudonymize: true` the same position held a generated pseudonym and
+  `entities_pseudonymized` was 3. The surrounding sentence and the tech stack were
+  unchanged in both.
 
 Not verified: the sequential scan's performance at scale (there is no index and
 no benchmark; the live session measures that), and behaviour under concurrent

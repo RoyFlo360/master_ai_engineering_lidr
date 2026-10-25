@@ -179,3 +179,8 @@ Both are counted per strategy in `COMPARISON_REPORT.md`.
 served. `semantic` embeds the corpus once; `propositional` and
 `contextual_retrieval` make one LLM call per component. The other five are free.
 
+**`pseudonymize`** — the optional boolean on `POST /embeddings/ingest` that
+rewrites chunk text through the PII pseudonymizer before embedding. Off by
+default because it changes the stored text and therefore the vectors. When on, it
+fails closed: no pseudonymizer means 503, never a plaintext write.
+

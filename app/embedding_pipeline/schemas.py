@@ -13,7 +13,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 # Closed universes. A typo or an unexpected value fails validation loudly
 # instead of silently leaking into the metadata that future retrieval filters on.
@@ -143,6 +150,16 @@ class IngestRequest(_StrictModel):
         description="Document family, e.g. 'historical_budget'.",
     )
     content: Budget = Field(description="Full budget JSON, as produced upstream.")
+    # StrictBool, not bool: Pydantic's lax mode turns "yes" and 1 into True.
+    # For a privacy control, guessing what the caller meant is worse than a 422.
+    pseudonymize: StrictBool = Field(
+        default=False,
+        description=(
+            "Replace personal data in the chunk text before embedding and "
+            "persisting. Off by default: it changes the stored text, so search "
+            "results (and their distances) no longer match the original corpus."
+        ),
+    )
 
     @field_validator("source_path")
     @classmethod
@@ -164,6 +181,14 @@ class IngestResponse(BaseModel):
     chunks_created: int = Field(ge=0, description="Chunks persisted for this document.")
     embedding_dimension: int = Field(description="Dimensionality of the stored vectors.")
     ingestion_time_ms: int = Field(ge=0, description="Wall-clock ingest time.")
+    entities_pseudonymized: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Entity spans replaced when `pseudonymize` was true; 0 otherwise. "
+            "The observable signal that the flag actually did something."
+        ),
+    )
 
 
 class SearchRequest(_StrictModel):

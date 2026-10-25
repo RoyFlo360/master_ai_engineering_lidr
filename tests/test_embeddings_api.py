@@ -66,9 +66,16 @@ class FakeRagIngestService:
         self.error = error
         self.calls: list[dict] = []
 
-    async def ingest(self, *, source_path, document_type, budget) -> IngestResponse:
+    async def ingest(
+        self, *, source_path, document_type, budget, pseudonymize: bool = False
+    ) -> IngestResponse:
         self.calls.append(
-            {"source_path": source_path, "document_type": document_type, "budget": budget}
+            {
+                "source_path": source_path,
+                "document_type": document_type,
+                "budget": budget,
+                "pseudonymize": pseudonymize,
+            }
         )
         if self.duplicate_of is not None:
             raise DuplicateDocumentError(self.duplicate_of)
@@ -104,6 +111,7 @@ def test_ingest_persists_and_returns_contract(wired) -> None:
         "chunks_created": 1,
         "embedding_dimension": 1536,
         "ingestion_time_ms": 42,
+        "entities_pseudonymized": 0,
     }
     # The router passes the validated Budget through, not the raw dict.
     assert fake.calls[0]["budget"].budget_id == "BUD-2024-001"
@@ -127,6 +135,62 @@ def test_ingest_accepts_a_budget_straight_from_the_sample_file(wired) -> None:
 
     assert response.status_code == 200, response.text
     assert fake.calls[0]["budget"].budget_id == budget["budget_id"]
+
+
+def test_pseudonymize_defaults_to_false(wired) -> None:
+    """The default must not change stored text — search distances depend on it."""
+    fake = FakeRagIngestService()
+    client = wired(fake)
+
+    client.post(URL, json=ingest_payload())
+
+    assert fake.calls[0]["pseudonymize"] is False
+
+
+def test_pseudonymize_flag_reaches_the_service(wired) -> None:
+    """If the router drops the flag, the client's PII request is silently ignored."""
+    fake = FakeRagIngestService()
+    client = wired(fake)
+
+    client.post(URL, json={**ingest_payload(), "pseudonymize": True})
+
+    assert fake.calls[0]["pseudonymize"] is True
+
+
+def test_pseudonymize_must_be_boolean(wired) -> None:
+    fake = FakeRagIngestService()
+    client = wired(fake)
+
+    response = client.post(URL, json={**ingest_payload(), "pseudonymize": "yes"})
+
+    assert response.status_code == 422
+    assert fake.calls == []
+
+
+def test_pseudonymizer_unavailable_returns_503_not_a_plaintext_write(wired) -> None:
+    """A deployment that cannot pseudonymize must refuse, never store plaintext."""
+    from app.embedding_pipeline.ingest_service import PseudonymizationUnavailable
+
+    client = wired(FakeRagIngestService(error=PseudonymizationUnavailable("not wired")))
+
+    response = client.post(URL, json={**ingest_payload(), "pseudonymize": True})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Pseudonymization is not available."}
+
+
+def test_entities_pseudonymized_is_reported(wired) -> None:
+    """The response must say what happened, or the flag is unobservable."""
+    class Reporting(FakeRagIngestService):
+        async def ingest(self, **kwargs):
+            real = await super().ingest(**kwargs)
+            return real.model_copy(update={"entities_pseudonymized": 3})
+
+    client = wired(Reporting())
+
+    body = client.post(URL, json={**ingest_payload(), "pseudonymize": True}).json()
+
+    assert body["entities_pseudonymized"] == 3
 
 
 def test_ingest_duplicate_returns_409_with_literal_shape(wired) -> None:

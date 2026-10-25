@@ -41,7 +41,9 @@ not leave a rule that the code contradicts.
 
 ## Status
 
-Rules here describe the system as it exists. Session-7 work (embedding pipeline,
-spec 010; data ingestion, spec 011) is Accepted but not implemented; where a rule
-covers it, the rule says so explicitly. Anything not marked planned is enforced by
-the current code.
+Rules here describe the system as it exists. Sessions 7 and 8 landed: the
+embedding pipeline (spec 010), data ingestion (spec 011), and pgvector
+persistence with semantic search (spec 012) are all Implemented, as is the
+chunking lab half of spec 013. Two things are genuinely **not** built and every
+rule that mentions them says so: vector indexes (HNSW/IVFFlat) and runtime model
+configuration. Anything not marked planned is enforced by the current code.
