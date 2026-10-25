@@ -73,6 +73,12 @@ Statuses: `Draft` · `Accepted` · `Implemented` · `Superseded by NNN`.
   — Implemented · the versioned catalog, JSON/TXT parsers, cleaning + Pandera
   validation and pseudonymization **inside** the run, job tracking, and the
   architecture-decision CLI
+- [012 — Session 8: pgvector persistence and semantic search](012-session-8-pgvector-and-search.md)
+  — Implemented · `documents`/`chunks` on a separate `RagBase`, a dialect-guarded
+  migration, one-transaction ingest with a unique `source_path`, and k-NN
+  search by cosine distance in SQL — with no vector index, on purpose
+- [013 — Session 8 extras: runtime model configuration and the chunking lab](013-session-8-runtime-config-and-chunking-lab.md)
+  — Implemented (chunking lab) · eight chunkers behind one interface, the comparison endpoint and CLI, and a real `COMPARISON_REPORT.md`. The runtime model-configuration half is deferred.
 
 ## How these were written
 
@@ -87,3 +93,7 @@ created at the end of that session.
 **007 was written after the Session-5 code**, documenting the fix that made it run
 (schema split, router mount, missing settings and prompts). Everything from **008 on
 is written first**, which is the point of the folder.
+
+**012 is Implemented** with its evidence recorded. **013 is partly implemented**:
+the chunking lab landed and produced `COMPARISON_REPORT.md`; the runtime
+model-configuration half was deferred, and the spec says so in its own words.

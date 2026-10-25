@@ -144,3 +144,38 @@ proceeds. The regex layers are unconditional.
 **Hermetic seam** — a `Depends(...)` factory in `app/dependencies.py` that a test can
 replace wholesale. All shared singletons (cache, wrapper, ledger, semantic cache,
 estimation service, session store, OpenAI client) are such seams.
+
+**Vector store** — the `documents` and `chunks` tables in Postgres with the
+`vector` extension (spec 012). Postgres-only; a SQLite `DATABASE_URL` keeps every
+other flow working and disables `/embeddings/ingest` and `/search`.
+
+**Document row** — one ingested budget: `source_path` (unique provenance),
+`document_type`, `ingested_at` and JSONB metadata.
+
+**Chunk row** — one budget component: the embeddable text, its `vector(1536)`
+embedding, `chunk_type` (`budget_component`) and filterable JSONB metadata.
+
+**Cosine distance** — `1 - cosine similarity`, computed in SQL with the `<=>`
+operator. Lower is closer. Chosen over L2/inner product to match the
+`vector_cosine_ops` class of the HNSW index a later phase adds.
+
+**`EMBEDDING_DIMENSIONS`** — 1536, the width of `text-embedding-3-small`. One
+constant shared by the ORM column, the migration and the runtime guard.
+
+**Sequential scan** — the deliberate absence of a vector index. The scan is the
+baseline the live session measures an index against.
+
+**Chunking strategy** — one implementation of the `Chunker` ABC in
+`app/embedding_pipeline/chunking/strategies/`. Eight exist: `structural` (the
+ingest default), `fixed_size`, `recursive`, `sentence_window`, `semantic`,
+`propositional`, `contextual_retrieval`, `hierarchical`. Compared by
+`POST /embeddings/compare`; only `structural` feeds the vector store.
+
+**Orphan chunk** — a chunk under 20 tokens: too small to carry meaning on its
+own. **Obese chunk** — over 800 tokens: too large to be a useful retrieval unit.
+Both are counted per strategy in `COMPARISON_REPORT.md`.
+
+**Ingestion cost** (of a strategy) — what it pays *before* a single query is
+served. `semantic` embeds the corpus once; `propositional` and
+`contextual_retrieval` make one LLM call per component. The other five are free.
+

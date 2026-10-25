@@ -13,14 +13,16 @@ import pytest
 from pydantic import ValidationError
 
 from app.embedding_pipeline.schemas import (
-    MAX_CHUNKS_PER_REQUEST,
     MAX_DESCRIPTION_CHARS,
+    MAX_QUERY_CHARS,
+    MAX_SEARCH_K,
+    MAX_SOURCE_PATH_CHARS,
     Budget,
     BudgetComponent,
     Chunk,
     EmbeddedChunk,
     IngestRequest,
-    IngestStats,
+    SearchRequest,
 )
 
 SAMPLE_PATH = Path(__file__).resolve().parent.parent / "data" / "budgets_sample.json"
@@ -28,6 +30,15 @@ SAMPLE_PATH = Path(__file__).resolve().parent.parent / "data" / "budgets_sample.
 
 def sample_budgets() -> list[dict]:
     return json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
+
+
+def sample_models() -> list[Budget]:
+    """The sample corpus as validated models.
+
+    The batch ``IngestRequest`` is gone (one document per request now), so the
+    sample is validated per budget.
+    """
+    return [Budget.model_validate(budget) for budget in sample_budgets()]
 
 
 def valid_budget_payload(**overrides) -> dict:
@@ -55,14 +66,13 @@ def valid_budget_payload(**overrides) -> dict:
 
 
 def test_sample_file_parses_and_validates() -> None:
-    request = IngestRequest.model_validate({"budgets": sample_budgets()})
-    assert len(request.budgets) == 15
-    assert sum(len(b.components) for b in request.budgets) == 52
+    budgets = sample_models()
+    assert len(budgets) == 17
+    assert sum(len(b.components) for b in budgets) == 60
 
 
 def test_sample_covers_every_declared_sector() -> None:
-    request = IngestRequest.model_validate({"budgets": sample_budgets()})
-    sectors = {budget.client_metadata.sector for budget in request.budgets}
+    sectors = {budget.client_metadata.sector for budget in sample_models()}
     assert sectors == {"finance", "ecommerce", "healthcare", "industrial"}
 
 
@@ -116,13 +126,6 @@ def test_unknown_request_field_is_rejected() -> None:
         )
 
 
-def test_duplicate_budget_ids_are_rejected() -> None:
-    with pytest.raises(ValidationError, match="budget_id"):
-        IngestRequest.model_validate(
-            {"budgets": [valid_budget_payload(), valid_budget_payload()]}
-        )
-
-
 def test_duplicate_component_ids_are_rejected() -> None:
     payload = valid_budget_payload()
     payload["components"].append(dict(payload["components"][0]))
@@ -130,19 +133,68 @@ def test_duplicate_component_ids_are_rejected() -> None:
         Budget.model_validate(payload)
 
 
-def test_chunk_cap_is_enforced() -> None:
-    budgets = []
-    for index in range(6):
-        payload = valid_budget_payload(budget_id=f"BUD-{index}")
-        component = payload["components"][0]
-        payload["components"] = [
-            {**component, "component_id": f"C-{n}"} for n in range(100)
-        ]
-        budgets.append(payload)
-    # 6 x 100 = 600 components > 500 chunk cap.
-    assert MAX_CHUNKS_PER_REQUEST == 500
-    with pytest.raises(ValidationError, match="cap"):
-        IngestRequest.model_validate({"budgets": budgets})
+def test_ingest_request_wraps_one_budget_and_rejects_unknown_fields() -> None:
+    payload = {
+        "source_path": "data/budgets_sample.json::BUD-2024-001",
+        "document_type": "historical_budget",
+        "content": valid_budget_payload(),
+    }
+    request = IngestRequest.model_validate(payload)
+    assert request.content.budget_id == "BUD-2024-999"
+
+    with pytest.raises(ValidationError):
+        IngestRequest.model_validate({**payload, "budgets": [valid_budget_payload()]})
+
+
+def test_the_session_7_batch_payload_is_rejected() -> None:
+    """One document per request: the old batch body must fail loudly."""
+    with pytest.raises(ValidationError):
+        IngestRequest.model_validate({"budgets": [valid_budget_payload()]})
+
+
+@pytest.mark.parametrize(
+    "source_path",
+    [
+        "",
+        "x" * (MAX_SOURCE_PATH_CHARS + 1),
+        "has\ttab",
+        "has\nnewline",
+        "has\x00nul",
+        " padded ",
+    ],
+)
+def test_source_path_is_bounded_and_clean(source_path: str) -> None:
+    with pytest.raises(ValidationError):
+        IngestRequest.model_validate(
+            {
+                "source_path": source_path,
+                "document_type": "historical_budget",
+                "content": valid_budget_payload(),
+            }
+        )
+
+
+def test_document_type_length_is_bounded() -> None:
+    with pytest.raises(ValidationError):
+        IngestRequest.model_validate(
+            {
+                "source_path": "x",
+                "document_type": "d" * 51,
+                "content": valid_budget_payload(),
+            }
+        )
+
+
+def test_search_request_defaults_and_bounds() -> None:
+    assert SearchRequest.model_validate({"query": "oauth"}).k == 5
+    assert SearchRequest.model_validate({"query": "oauth", "k": MAX_SEARCH_K}).k == 50
+    for bad_k in (0, -1, MAX_SEARCH_K + 1):
+        with pytest.raises(ValidationError):
+            SearchRequest.model_validate({"query": "oauth", "k": bad_k})
+    with pytest.raises(ValidationError):
+        SearchRequest.model_validate({"query": "x" * (MAX_QUERY_CHARS + 1)})
+    with pytest.raises(ValidationError):
+        SearchRequest.model_validate({"query": ""})
 
 
 def test_description_length_cap_is_enforced() -> None:
@@ -160,19 +212,9 @@ def test_chunk_and_embedded_chunk_round_trip() -> None:
     assert embedded.embedding == [0.1, 0.2]
 
 
-def test_ingest_stats_serializes_to_the_documented_keys() -> None:
-    stats = IngestStats(
-        total_budgets=15,
-        total_chunks=52,
-        total_tokens=4100,
-        estimated_cost_usd=0.000082,
-    )
-    assert stats.model_dump() == {
-        "total_budgets": 15,
-        "total_chunks": 52,
-        "total_tokens": 4100,
-        "estimated_cost_usd": 0.000082,
-    }
+def test_search_request_forbids_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        SearchRequest.model_validate({"query": "oauth", "k": 3, "filter": "x"})
 
 
 def test_component_tech_stack_cap_is_enforced() -> None:

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 # Reentrant on purpose: ``get_session_factory`` holds this lock while calling
@@ -31,6 +32,11 @@ from sqlalchemy.orm import Session, sessionmaker
 _LOCK = threading.RLock()
 _ENGINES: dict[str, Engine] = {}
 _FACTORIES: dict[str, sessionmaker[Session]] = {}
+# The async stack (Session 8 RAG store) keeps its own caches: an AsyncEngine is
+# not interchangeable with an Engine, and the two may be built for different
+# driver spellings of the same database.
+_ASYNC_ENGINES: dict[str, AsyncEngine] = {}
+_ASYNC_FACTORIES: dict[str, async_sessionmaker] = {}
 
 
 def _prepare_sqlite_path(url: str) -> None:
@@ -66,6 +72,38 @@ def _default_url() -> str:
     from app.config import get_settings
 
     return get_settings().DATABASE_URL
+
+
+def is_postgres_url(url: str | None = None) -> bool:
+    """True when ``url`` (default: settings) talks to Postgres.
+
+    The vector store is Postgres-only, but ``DATABASE_URL`` defaults to SQLite so
+    the suite and a laptop run need no database. Callers use this to fail with a
+    clear message instead of a ``CompileError`` from ``Vector`` on SQLite.
+    """
+    resolved = url or _default_url()
+    try:
+        return make_url(resolved).get_backend_name() == "postgresql"
+    except Exception:  # noqa: BLE001 - a malformed URL fails later, loudly
+        return False
+
+
+def _async_database_url(url: str | None = None) -> str:
+    """Derive the asyncpg URL from the canonical (sync) one.
+
+    ``DATABASE_URL`` uses the sync driver because Alembic and the ingestion
+    repositories run synchronously. The RAG store swaps the driver token instead
+    of introducing a second environment variable, so one URL configures the whole
+    service.
+    """
+    resolved = url or _default_url()
+    if "+psycopg" in resolved:
+        return resolved.replace("+psycopg", "+asyncpg")
+    if resolved.startswith("postgresql://"):
+        return resolved.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if resolved.startswith("postgres://"):
+        return resolved.replace("postgres://", "postgresql+asyncpg://", 1)
+    return resolved
 
 
 def get_engine(url: str | None = None) -> Engine:
@@ -134,13 +172,58 @@ def get_session() -> Iterator[Session]:
         session.close()
 
 
+# --- Session 8: async stack for the pgvector store -------------------------
+
+
+def get_async_engine(url: str | None = None) -> AsyncEngine:
+    """Return the async engine for ``url`` (default: settings, driver swapped).
+
+    Built on first call, cached per URL. Importing this module still creates no
+    engine and no connection.
+    """
+    resolved = _async_database_url(url)
+    with _LOCK:
+        engine = _ASYNC_ENGINES.get(resolved)
+        if engine is None:
+            engine = create_async_engine(resolved, pool_pre_ping=True)
+            _ASYNC_ENGINES[resolved] = engine
+        return engine
+
+
+def get_async_session_factory(url: str | None = None) -> async_sessionmaker:
+    """Session factory for the async stack.
+
+    ``expire_on_commit=False`` so ORM objects (the freshly persisted document id)
+    stay readable after the transaction commits.
+    """
+    resolved = _async_database_url(url)
+    with _LOCK:
+        factory = _ASYNC_FACTORIES.get(resolved)
+        if factory is None:
+            factory = async_sessionmaker(
+                bind=get_async_engine(url),
+                autoflush=False,
+                expire_on_commit=False,
+            )
+            _ASYNC_FACTORIES[resolved] = factory
+        return factory
+
+
 def reset_engines() -> None:
-    """Dispose cached engines and forget them. Tests use this between databases."""
+    """Dispose cached engines and forget them. Tests use this between databases.
+
+    The async engines are disposed through ``dispose()``'s awaitable counterpart;
+    for a disposed-but-not-awaited engine the connection pool is still released
+    when the object is garbage collected, and tests use ``asyncio.run`` around
+    ``dispose`` where it matters.
+    """
     with _LOCK:
         for engine in _ENGINES.values():
             engine.dispose()
         _ENGINES.clear()
         _FACTORIES.clear()
+        _ASYNC_ENGINES.clear()
+        _ASYNC_FACTORIES.clear()
 
 
 def dispose_engine(url: str | None = None) -> None:
@@ -156,9 +239,12 @@ def dispose_engine(url: str | None = None) -> None:
 __all__ = [
     "SessionLocal",
     "dispose_engine",
+    "get_async_engine",
+    "get_async_session_factory",
     "get_engine",
     "get_job_session_factory",
     "get_session",
     "get_session_factory",
+    "is_postgres_url",
     "reset_engines",
 ]

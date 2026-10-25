@@ -28,7 +28,14 @@ lockfile; `uv lock --check` reports whether it still matches the project file.
 | `streamlit` | `>=1.64.0` | The three HTTP clients; compose runs `streamlit_app_loader.py` | The UI container has nothing to run |
 | `tiktoken` | `>=0.7.0` | Token counting for the embedding chunker (`app/embedding_pipeline/chunker.py`) | `token_count` is unavailable; the embedder cannot size its batches by tokens |
 | `pyyaml` | `>=6.0` | Catalog loading (`app/ingestion/catalog/loader.py`) | The catalog cannot be read; ingestion has no allow-list |
-| `sqlalchemy` | `>=2.0` | Persistence models and repositories (`app/persistence/`) | No job rows or pseudonym mappings |
+| `sqlalchemy[asyncio]` | `>=2.0` | Persistence models and repositories, plus the async RAG store. The extra pulls `greenlet`, which SQLAlchemy's asyncio extension requires | No job rows, no pseudonym mappings, and no async vector store |
+| `asyncpg` | `>=0.29` | Async Postgres driver for `/embeddings/ingest` and `/search` (spec 012) | The vector endpoints cannot run; the sync stack is unaffected |
+| `pgvector` | `>=0.3` | Registers the `vector` column type and exposes `cosine_distance` to SQLAlchemy | The RAG tables cannot be declared or migrated |
+| `anthropic` | `>=0.40` | Native Anthropic SDK, used by the `contextual_retrieval` chunker for `cache_control` on the parent document | That strategy is unavailable; the comparison still runs the other seven |
+| `langchain-text-splitters` | `>=0.3.0` | Separator-hierarchy splitting for the `recursive` chunker | The `recursive` strategy is unavailable |
+| `langchain-experimental` | `>=0.3.0` | `SemanticChunker` (breakpoint splitting) for the `semantic` strategy. **Upstream marks it sunset** | The `semantic` strategy is unavailable |
+| `langchain-openai` | `>=0.2.0` | `OpenAIEmbeddings` adapter the semantic splitter needs | Same as above |
+| `nltk` | `>=3.9` | Sentence tokenization for the `sentence_window` chunker; downloads `punkt_tab` lazily | That strategy raises an actionable error until the data is present |
 | `alembic` | `>=1.13` | Schema migrations (`alembic/`) | The tables cannot be created; compose's `upgrade head` fails |
 | `psycopg[binary]` | `>=3.1` | Postgres driver | `DATABASE_URL` must stay on SQLite |
 | `pandas` | `>=2.2` | Cleaning of raw budget records | Ingestion cannot clean; every parsed record becomes a document |

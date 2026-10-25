@@ -13,16 +13,16 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Closed universes. A typo or an unexpected value fails validation loudly
 # instead of silently leaking into the metadata that future retrieval filters on.
 Sector = Literal["finance", "ecommerce", "healthcare", "industrial"]
 Complexity = Literal["low", "medium", "high"]
 
-# Request caps. Sized to accept the 15-budget sample (52 components) with wide
-# headroom while bounding memory, response size and embedding spend. A chunk is
-# 1536 floats, so 500 chunks is already ~30 MB of JSON in the response.
+# Request caps. Sized to accept the sample corpus (17 budgets, 60 components)
+# with wide headroom while bounding memory, response size and embedding spend.
+# A chunk is 1536 floats, so 500 chunks is already ~30 MB of JSON in a response.
 MAX_BUDGETS_PER_REQUEST = 100
 MAX_COMPONENTS_PER_BUDGET = 100
 MAX_CHUNKS_PER_REQUEST = 500
@@ -30,6 +30,13 @@ MAX_NAME_CHARS = 500
 MAX_DESCRIPTION_CHARS = 20_000
 MAX_TECH_STACK_ENTRIES = 50
 MAX_HOURS_PER_COMPONENT = 100_000
+# Session 8 — the persistent ingest takes ONE document per request, so the batch
+# caps above now belong to the chunking comparison (Track B). These bound the
+# two fields that are stored rather than validated away.
+MAX_SOURCE_PATH_CHARS = 512
+MAX_DOCUMENT_TYPE_CHARS = 50
+MAX_QUERY_CHARS = 2_000
+MAX_SEARCH_K = 50
 
 
 class _StrictModel(BaseModel):
@@ -113,39 +120,80 @@ class EmbeddedChunk(Chunk):
     embedding: list[float]
 
 
-class IngestStats(BaseModel):
-    """Aggregate counters returned with an ingest response."""
-
-    total_budgets: int = Field(ge=0)
-    total_chunks: int = Field(ge=0)
-    total_tokens: int = Field(ge=0)
-    estimated_cost_usd: float = Field(ge=0.0)
-
-
 class IngestRequest(_StrictModel):
-    """Payload for ``POST /embeddings/ingest``."""
+    """Payload for ``POST /embeddings/ingest`` (Session 8: one document).
 
-    budgets: list[Budget] = Field(min_length=1, max_length=MAX_BUDGETS_PER_REQUEST)
+    One request = one document. ``content`` is the full budget JSON, validated
+    against :class:`Budget` so a malformed corpus fails with a 422 before
+    touching the database or the embeddings API.
 
-    @model_validator(mode="after")
-    def _identifiers_unique_and_bounded(self) -> "IngestRequest":
-        budget_ids = [budget.budget_id for budget in self.budgets]
-        if len(set(budget_ids)) != len(budget_ids):
-            raise ValueError(
-                "budget_id values must be unique within a request: "
-                "chunk_id is derived from the budget id"
-            )
-        total_components = sum(len(budget.components) for budget in self.budgets)
-        if total_components > MAX_CHUNKS_PER_REQUEST:
-            raise ValueError(
-                f"request would produce {total_components} chunks; "
-                f"the cap is {MAX_CHUNKS_PER_REQUEST}"
-            )
-        return self
+    ``source_path`` is provenance and the uniqueness key, **not** a file that is
+    read: path traversal is not the risk here, unbounded storage is. Hence the
+    length cap and the control-character rejection, not a path allow-list.
+    """
+
+    source_path: str = Field(
+        min_length=1,
+        max_length=MAX_SOURCE_PATH_CHARS,
+        description="Provenance of the document, unique per ingest.",
+    )
+    document_type: str = Field(
+        min_length=1,
+        max_length=MAX_DOCUMENT_TYPE_CHARS,
+        description="Document family, e.g. 'historical_budget'.",
+    )
+    content: Budget = Field(description="Full budget JSON, as produced upstream.")
+
+    @field_validator("source_path")
+    @classmethod
+    def _no_control_characters(cls, value: str) -> str:
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("source_path must not contain control characters")
+        if value.strip() != value:
+            raise ValueError("source_path must not have leading or trailing whitespace")
+        return value
 
 
 class IngestResponse(BaseModel):
-    """Response for ``POST /embeddings/ingest``."""
+    """Response for ``POST /embeddings/ingest``: identifiers + ingest metrics.
 
-    chunks: list[EmbeddedChunk]
-    stats: IngestStats
+    Vectors no longer travel over HTTP — they are persisted in pgvector.
+    """
+
+    document_id: int = Field(description="Primary key of the persisted document.")
+    chunks_created: int = Field(ge=0, description="Chunks persisted for this document.")
+    embedding_dimension: int = Field(description="Dimensionality of the stored vectors.")
+    ingestion_time_ms: int = Field(ge=0, description="Wall-clock ingest time.")
+
+
+class SearchRequest(_StrictModel):
+    """Payload for ``POST /search``."""
+
+    query: str = Field(
+        min_length=1, max_length=MAX_QUERY_CHARS, description="Free-text semantic query."
+    )
+    k: int = Field(default=5, ge=1, le=MAX_SEARCH_K, description="Nearest chunks to return.")
+
+
+class SearchHit(BaseModel):
+    """One ranked chunk.
+
+    ``chunk_id`` is the database primary key; the traceable corpus id
+    (``BUD-...::COMP-...``) travels inside ``metadata``.
+    """
+
+    chunk_id: int
+    document_id: int
+    chunk_type: str
+    content: str
+    distance: float = Field(description="Cosine distance (lower = more similar).")
+    metadata: dict
+
+
+class SearchResponse(BaseModel):
+    """Response for ``POST /search``."""
+
+    query: str
+    k: int
+    search_time_ms: int = Field(ge=0)
+    results: list[SearchHit]

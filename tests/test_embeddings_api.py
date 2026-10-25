@@ -1,8 +1,9 @@
-"""HTTP tests for ``POST /embeddings/ingest``.
+"""HTTP tests for the persisting ``POST /embeddings/ingest`` (Session 8).
 
-The router, the real chunker and the real schemas are exercised; only the
-embedder is replaced through ``app.dependency_overrides``. No provider is ever
-called.
+We bypass Postgres and OpenAI entirely: ``get_rag_ingest_service`` is overridden
+with an in-memory fake that mimics the service contract (response model +
+``DuplicateDocumentError``). This exercises the router wiring, the literal 409
+shape and the error mapping without infrastructure.
 """
 
 from __future__ import annotations
@@ -14,174 +15,208 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main
-from app.dependencies import get_chunker, get_embedder
-from app.embedding_pipeline.chunker import JSONStructuralChunker
-from app.embedding_pipeline.schemas import Chunk, EmbeddedChunk
+from app.dependencies import get_rag_ingest_service
+from app.embedding_pipeline.ingest_service import (
+    DuplicateDocumentError,
+    EmbeddingDimensionMismatch,
+)
+from app.embedding_pipeline.schemas import IngestResponse
 
 SAMPLE_PATH = Path(__file__).resolve().parent.parent / "data" / "budgets_sample.json"
 URL = "/embeddings/ingest"
 
 
-def sample_payload() -> dict:
-    return {"budgets": json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))}
-
-
-def minimal_budget(budget_id: str = "BUD-1", component_id: str = "C-1") -> dict:
+def budget_payload(budget_id: str = "BUD-2024-001", component_id: str = "AUTH-001") -> dict:
     return {
         "budget_id": budget_id,
-        "client_metadata": {"name": "Acme", "sector": "finance", "country": "ES"},
-        "project_summary": "A small API.",
-        "main_technology": "python_fastapi",
+        "client_metadata": {"name": "FintechCorp", "sector": "finance", "country": "ES"},
+        "project_summary": "Mobile banking API with OAuth 2.0",
+        "main_technology": "ruby_on_rails",
         "year": 2024,
-        "total_estimated_hours": 5,
+        "total_estimated_hours": 120,
         "components": [
             {
                 "component_id": component_id,
-                "name": "Auth",
-                "description": "Token-based authentication.",
-                "tech_stack": ["python_fastapi"],
-                "estimated_hours": 5,
-                "complexity": "low",
+                "name": "OAuth 2.0 backend",
+                "description": "OAuth flows with JWT session management.",
+                "tech_stack": ["ruby_on_rails", "postgresql"],
+                "estimated_hours": 120,
+                "complexity": "high",
                 "dependencies": [],
             }
         ],
     }
 
 
-class FakeEmbedder:
-    """Returns a deterministic vector per chunk; records what it was given."""
-
-    def __init__(self, dim: int = 4) -> None:
-        self.dim = dim
-        self.seen: list[list[Chunk]] = []
-
-    def embed_many(self, chunks: list[Chunk]) -> list[EmbeddedChunk]:
-        self.seen.append(list(chunks))
-        return [
-            EmbeddedChunk(**chunk.model_dump(), embedding=[0.5] * self.dim)
-            for chunk in chunks
-        ]
+def ingest_payload() -> dict:
+    return {
+        "source_path": "data/budgets_sample.json::BUD-2024-001",
+        "document_type": "historical_budget",
+        "content": budget_payload(),
+    }
 
 
-class RaisingEmbedder:
-    def __init__(self, message: str = "provider exploded") -> None:
-        self.message = message
+def first_sample_budget() -> dict:
+    return json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))[0]
 
-    def embed_many(self, chunks: list[Chunk]) -> list[EmbeddedChunk]:
-        raise RuntimeError(self.message)
+
+class FakeRagIngestService:
+    def __init__(self, *, duplicate_of: int | None = None, error: Exception | None = None) -> None:
+        self.duplicate_of = duplicate_of
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def ingest(self, *, source_path, document_type, budget) -> IngestResponse:
+        self.calls.append(
+            {"source_path": source_path, "document_type": document_type, "budget": budget}
+        )
+        if self.duplicate_of is not None:
+            raise DuplicateDocumentError(self.duplicate_of)
+        if self.error is not None:
+            raise self.error
+        return IngestResponse(
+            document_id=7,
+            chunks_created=len(budget.components),
+            embedding_dimension=1536,
+            ingestion_time_ms=42,
+        )
 
 
 @pytest.fixture
 def wired(client: TestClient):
-    """Wire the router to a fake embedder and the real chunker."""
-
-    def _wire(embedder) -> TestClient:
-        main.app.dependency_overrides[get_chunker] = lambda: JSONStructuralChunker()
-        main.app.dependency_overrides[get_embedder] = lambda: embedder
+    def _wire(service) -> TestClient:
+        main.app.dependency_overrides[get_rag_ingest_service] = lambda: service
         return client
 
     yield _wire
     main.app.dependency_overrides.clear()
 
 
-def test_sample_returns_one_embedded_chunk_per_component(wired) -> None:
-    embedder = FakeEmbedder()
-    client = wired(embedder)
+def test_ingest_persists_and_returns_contract(wired) -> None:
+    fake = FakeRagIngestService()
+    client = wired(fake)
 
-    response = client.post(URL, json=sample_payload())
+    response = client.post(URL, json=ingest_payload())
 
     assert response.status_code == 200, response.text
-    body = response.json()
-    assert len(body["chunks"]) == 52
-    assert body["stats"]["total_budgets"] == 15
-    assert body["stats"]["total_chunks"] == 52
-    assert body["stats"]["total_tokens"] > 0
-    assert body["stats"]["estimated_cost_usd"] >= 0.0
+    assert response.json() == {
+        "document_id": 7,
+        "chunks_created": 1,
+        "embedding_dimension": 1536,
+        "ingestion_time_ms": 42,
+    }
+    # The router passes the validated Budget through, not the raw dict.
+    assert fake.calls[0]["budget"].budget_id == "BUD-2024-001"
+    assert fake.calls[0]["source_path"] == "data/budgets_sample.json::BUD-2024-001"
+    assert fake.calls[0]["document_type"] == "historical_budget"
 
 
-def test_stats_are_consistent_with_the_chunks(wired) -> None:
-    client = wired(FakeEmbedder())
-    body = client.post(URL, json=sample_payload()).json()
+def test_ingest_accepts_a_budget_straight_from_the_sample_file(wired) -> None:
+    fake = FakeRagIngestService()
+    client = wired(fake)
+    budget = first_sample_budget()
 
-    assert body["stats"]["total_chunks"] == len(body["chunks"])
-    assert body["stats"]["total_tokens"] == sum(
-        chunk["token_count"] for chunk in body["chunks"]
+    response = client.post(
+        URL,
+        json={
+            "source_path": f"data/budgets_sample.json::{budget['budget_id']}",
+            "document_type": "historical_budget",
+            "content": budget,
+        },
     )
-    expected_cost = body["stats"]["total_tokens"] / 1_000_000 * 0.02
-    assert body["stats"]["estimated_cost_usd"] == pytest.approx(expected_cost)
+
+    assert response.status_code == 200, response.text
+    assert fake.calls[0]["budget"].budget_id == budget["budget_id"]
 
 
-def test_chunk_order_matches_the_request(wired) -> None:
-    client = wired(FakeEmbedder())
-    body = client.post(URL, json=sample_payload()).json()
-    chunk_ids = [chunk["chunk_id"] for chunk in body["chunks"]]
-    assert chunk_ids[0].startswith("BUD-2024-001::")
-    assert len(set(chunk_ids)) == len(chunk_ids)
+def test_ingest_duplicate_returns_409_with_literal_shape(wired) -> None:
+    client = wired(FakeRagIngestService(duplicate_of=42))
+
+    response = client.post(URL, json=ingest_payload())
+
+    assert response.status_code == 409
+    # Top-level shape from the exercise statement, NOT nested under "detail".
+    assert response.json() == {"detail": "Document already ingested", "document_id": 42}
 
 
-def test_every_chunk_carries_a_full_vector(wired) -> None:
-    client = wired(FakeEmbedder(dim=8))
-    body = client.post(URL, json=sample_payload()).json()
-    assert all(len(chunk["embedding"]) == 8 for chunk in body["chunks"])
-    assert all(chunk["metadata"]["budget_id"] for chunk in body["chunks"])
+def test_ingest_service_unavailable_returns_500(wired) -> None:
+    client = wired(None)
+
+    response = client.post(URL, json=ingest_payload())
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Embedding service is not available."}
 
 
-def test_single_budget_round_trip(wired) -> None:
-    client = wired(FakeEmbedder())
-    response = client.post(URL, json={"budgets": [minimal_budget()]})
-    assert response.status_code == 200
-    body = response.json()
-    assert body["chunks"][0]["chunk_id"] == "BUD-1::C-1"
-    assert body["stats"]["total_chunks"] == 1
+def test_ingest_invalid_budget_returns_422_before_touching_the_service(wired) -> None:
+    fake = FakeRagIngestService()
+    client = wired(fake)
+    payload = ingest_payload()
+    payload["content"].pop("components")  # Budget requires >= 1 component
+
+    response = client.post(URL, json=payload)
+
+    assert response.status_code == 422
+    assert fake.calls == []
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        {"budgets": []},
+        # The Session-7 batch body: gone, and it must fail loudly.
+        {"budgets": [{"budget_id": "BUD-1"}]},
         {},
-        {"budgets": [minimal_budget()], "unknown": 1},
-        {"budgets": [minimal_budget(), minimal_budget()]},
+        {"source_path": "x", "document_type": "historical_budget"},
+        {**ingest_payload(), "unknown": 1},
+        {**ingest_payload(), "source_path": ""},
     ],
 )
 def test_invalid_payloads_return_422(wired, payload) -> None:
-    client = wired(FakeEmbedder())
+    fake = FakeRagIngestService()
+    client = wired(fake)
     assert client.post(URL, json=payload).status_code == 422
+    assert fake.calls == []
 
 
 def test_unknown_sector_returns_422(wired) -> None:
-    client = wired(FakeEmbedder())
-    payload = {"budgets": [minimal_budget()]}
-    payload["budgets"][0]["client_metadata"]["sector"] = "fintech"
+    fake = FakeRagIngestService()
+    client = wired(fake)
+    payload = ingest_payload()
+    payload["content"]["client_metadata"]["sector"] = "fintech"
+
     assert client.post(URL, json=payload).status_code == 422
+    assert fake.calls == []
 
 
-def test_missing_embedder_returns_generic_500(wired) -> None:
-    client = wired(None)
-    response = client.post(URL, json=sample_payload())
-    assert response.status_code == 500
-    assert response.json() == {"detail": "Embedding service is not available."}
+def test_embedding_failure_returns_generic_500_without_leaking_detail(wired) -> None:
+    client = wired(
+        FakeRagIngestService(error=RuntimeError("sk-secret-key exploded in provider"))
+    )
 
+    response = client.post(URL, json=ingest_payload())
 
-def test_provider_failure_returns_generic_500_without_leaking_detail(wired) -> None:
-    client = wired(RaisingEmbedder(message="sk-secret-key exploded in provider"))
-    response = client.post(URL, json=sample_payload())
     assert response.status_code == 500
     assert response.json() == {"detail": "Failed to generate embeddings."}
     assert "sk-secret" not in response.text
     assert "exploded" not in response.text
 
 
+def test_dimension_mismatch_returns_generic_500_without_leaking_detail(wired) -> None:
+    client = wired(
+        FakeRagIngestService(
+            error=EmbeddingDimensionMismatch("provider returned 768 dims, column is 1536")
+        )
+    )
+
+    response = client.post(URL, json=ingest_payload())
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to generate embeddings."}
+    assert "768" not in response.text
+
+
 def test_route_is_documented_in_openapi(client: TestClient) -> None:
     spec = client.get("/openapi.json").json()
     assert URL in spec["paths"]
     assert "post" in spec["paths"][URL]
-
-
-def test_chunker_is_given_the_validated_budgets(wired) -> None:
-    embedder = FakeEmbedder()
-    client = wired(embedder)
-    client.post(URL, json=sample_payload())
-    # One call, 52 chunks, and no chunk duplicated by the router.
-    assert len(embedder.seen) == 1
-    assert len(embedder.seen[0]) == 52
+    assert "409" in spec["paths"][URL]["post"]["responses"]

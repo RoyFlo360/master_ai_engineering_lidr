@@ -45,6 +45,10 @@ log the cause.
 | Attachment text | 60,000 characters per file | `MAX_ATTACHMENT_CHARS`, applied after extraction |
 | Attachment types | `.pdf`, `.docx` only | `extract_text` |
 | Critic issues | 12 per review | `CriticFeedback` |
+| `source_path` | 512 characters, no control characters, no surrounding whitespace | `IngestRequest` |
+| `document_type` | 50 characters | `IngestRequest` |
+| Search `query` | 2,000 characters | `SearchRequest` |
+| Search `k` | 1â€“50 | `SearchRequest` |
 | Structured fields | per-field maxima in the schemas | Pydantic |
 
 Rules: a new free-text input needs an explicit maximum at the schema or form layer. A

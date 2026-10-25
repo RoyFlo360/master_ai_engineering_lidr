@@ -8,14 +8,14 @@ from pathlib import Path
 import tiktoken
 
 from app.embedding_pipeline.chunker import JSONStructuralChunker
-from app.embedding_pipeline.schemas import Budget, IngestRequest
+from app.embedding_pipeline.schemas import Budget
 
 SAMPLE_PATH = Path(__file__).resolve().parent.parent / "data" / "budgets_sample.json"
 
 
 def sample_budgets() -> list[Budget]:
     payload = json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
-    return IngestRequest.model_validate({"budgets": payload}).budgets
+    return [Budget.model_validate(budget) for budget in payload]
 
 
 def one_budget() -> Budget:
@@ -50,7 +50,7 @@ def test_one_component_becomes_one_chunk() -> None:
     chunker = JSONStructuralChunker()
     budgets = sample_budgets()
     chunks = chunker.chunk(budgets)
-    assert len(chunks) == 52
+    assert len(chunks) == 60
     assert len(chunks) == sum(len(b.components) for b in budgets)
 
 

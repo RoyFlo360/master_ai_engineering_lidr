@@ -222,11 +222,11 @@ by `to_messages(system_prompt=...)`, so it is always present and always current.
 Sessions live in the API process's memory: a restart or a second worker loses or
 forks them. That is a known limit of the exercise, not a bug.
 
-## Embeddings (Session 7)
+## Embeddings and semantic search (Sessions 7–8)
 
-`app/embedding_pipeline/` turns normalized budget JSON into vectors. This is the
-first step of semantic search: vectors are generated in memory and returned over
-HTTP. Nothing is persisted yet — that is the retrieval phase.
+`app/embedding_pipeline/` turns normalized budget JSON into vectors **and now
+persists them in Postgres + pgvector**, so a corpus can be searched instead of
+re-embedded on every request.
 
 **Chunking is structural.** One budget component becomes exactly one chunk. Each
 chunk's text is prefixed with a contextual header (project summary, sector, year,
@@ -235,76 +235,139 @@ client it belongs to. No overlap and no fixed-size splitting: an oversized
 component is surfaced through `token_count`, not silently cut.
 
 **Embedding is batched.** `OpenAIEmbedder` calls `text-embedding-3-small` with up
-to 100 chunks per request, retries only rate limits (1s/2s/4s), and reports tokens
-and estimated cost at $0.02 per 1M input tokens.
+to 100 chunks per request and retries only rate limits (1s/2s/4s).
 
 ```shell
 POST /embeddings/ingest
-{"budgets": [ <Budget>, ... ]}
-→ 200 {"chunks": [ <EmbeddedChunk>, ... ],
-       "stats": {"total_budgets", "total_chunks", "total_tokens", "estimated_cost_usd"}}
+{"source_path": "data/budgets_sample.json::BUD-2024-001",
+ "document_type": "historical_budget",
+ "content": <Budget>}
+→ 200 {"document_id": 1, "chunks_created": 4,
+        "embedding_dimension": 1536, "ingestion_time_ms": 412}
+→ 409 {"detail": "Document already ingested", "document_id": 1}
 ```
 
-`422` for a validation failure (bad enum, out-of-range value, unknown field,
-duplicate identifier, or payload cap exceeded), `500` with a generic message when
-no `OPENAI_API_KEY` is configured or the provider fails. Details go to the log,
-never the response. The route appears in `/docs`.
-
-Request caps: ≤100 budgets, ≤100 components per budget, ≤500 chunks per request,
-≤20,000 characters per description.
-
-With the 15-budget sample (`data/budgets_sample.json`): **52 chunks, 4,126 tokens,
-≈$0.0000825**.
+One request is **one document**, written with its chunks in a single transaction:
+if the embeddings API fails, nothing is committed and no orphan `documents` row
+survives. The `409` body is top-level, not nested under `detail` — the one
+deliberate exception in the API.
 
 ```shell
-# bash / Git Bash — the sample is a bare array; the endpoint wants {"budgets": [...]}
-curl -s -X POST http://localhost:8000/embeddings/ingest \
-  -H 'Content-Type: application/json' \
-  -d "{\"budgets\": $(cat data/budgets_sample.json)}"
+POST /search
+{"query": "REST API with OAuth authentication for fintech sector", "k": 5}
+→ 200 {"query": "...", "k": 5, "search_time_ms": 87,
+        "results": [{"chunk_id": 156, "document_id": 12,
+                     "chunk_type": "budget_component", "content": "...",
+                     "distance": 0.231, "metadata": {...}}]}
 ```
 
-```powershell
-# PowerShell 5.1: do NOT round-trip through ConvertFrom-Json/ConvertTo-Json.
-# It serialises the array as {"value": [...], "Count": N} and the request 422s.
-# Build the wrapper as text instead:
-$json = '{"budgets":' + (Get-Content data/budgets_sample.json -Raw) + '}'
-$r = Invoke-RestMethod -Method Post -Uri http://localhost:8000/embeddings/ingest `
-  -ContentType 'application/json' -Body $json
-$r.stats
+`distance` is **cosine distance** (lower = more similar), ascending. `422` for a
+bad body or `k` outside `1..50`; an empty corpus is a `200` with `results: []`;
+`500` with a generic body when the service cannot run (no `OPENAI_API_KEY`, a
+non-Postgres `DATABASE_URL`, or a mismatched embedding model). Details go to the
+log, never the response.
+
+### Four schema decisions worth defending
+
+- **Two tables, not one.** A budget produces N chunks: a real one-to-many. One
+  table would duplicate document metadata in every row. With `ON DELETE CASCADE`,
+  deleting a budget removes its chunks; `documents` owns provenance, `chunks`
+  owns vectors.
+- **`metadata` as JSONB, not columns.** Stable fields are typed columns; whatever
+  the chunker enriches (sector, technologies, hours) goes to JSONB behind a GIN
+  index, queryable without a migration per new key.
+- **Cosine, not L2 or inner product.** OpenAI embeddings are normalized so the
+  ranking is equivalent; cosine matches the RAG literature and, concretely, the
+  `vector_cosine_ops` operator class of the HNSW index a later phase adds. An
+  operator/index mismatch makes Postgres ignore the index **silently**.
+- **No vector index — deliberate.** The sequential scan is the baseline the live
+  session measures HNSW against. At 17 budgets / 60 chunks it answers in a few
+  hundred milliseconds.
+
+`vector(1536)` is hard-coded because changing it means re-embedding the corpus.
+`embedding` is nullable so an "insert now, embed later" path stays open.
+
+### Requirements
+
+The vector store needs **Postgres** (`pgvector/pgvector:pg16`, already in
+compose) and **`OPENAI_API_KEY`**. A SQLite `DATABASE_URL` keeps every other flow
+working; `/embeddings/ingest` and `/search` return the generic 500 instead of
+failing with a schema error.
+
+With the 17-budget sample: **60 chunks, 5,970 tokens** — one document per budget.
+
+```shell
+docker compose up -d
+docker compose exec api alembic upgrade head     # applies on boot too
+docker compose run --rm api python scripts/query_examples.py
 ```
 
-```powershell
-# curl.exe ships with Windows 10+ and is the least surprising option
-$json = '{"budgets":' + (Get-Content data/budgets_sample.json -Raw) + '}'
-Set-Content "$env:TEMP\budgets.json" $json -Encoding utf8
-curl.exe -s -o NUL -w "status=%{http_code} size=%{size_download}B`n" `
-  -X POST http://localhost:8000/embeddings/ingest `
-  -H "Content-Type: application/json" --data-binary "@$env:TEMP\budgets.json"
-```
+`scripts/query_examples.py` ingests the corpus (idempotent: already-present
+budgets answer 409 and are skipped) and runs the five query angles from the
+brief. Its real output against the sample corpus is in
+[`output_examples.txt`](output_examples.txt).
 
 ### Sanity check: `scripts/compare.py`
 
-Embeds two texts and prints their cosine similarity, computed with the standard
-library (no NumPy). Run it outside the container with the `.env` loaded, or inside
-the container (the compose service is named `api`):
+Still useful for the embedding model itself: it embeds two texts and prints their
+cosine similarity, computed with the standard library (no NumPy). Recorded
+results for the three required pairs live in
+`app/embedding_pipeline/SANITY_CHECK.md` (A 0.5957, B 0.1920, C 0.5407).
 
 ```shell
 uv run python scripts/compare.py \
   --text-a "OAuth 2.0 authentication backend for fintech" \
   --text-b "JWT-based authorization service for banking app"
-
-docker compose exec api python scripts/compare.py \
-  --text-a "OAuth 2.0 authentication backend for fintech" \
-  --text-b "JWT-based authorization service for banking app"
 ```
 
-Recorded results for the three required pairs live in
-`app/embedding_pipeline/SANITY_CHECK.md` (A 0.5957, B 0.1920, C 0.5407).
-Note that Pair A sits just below the 0.6 rule of thumb and Pair C (generic text)
-lands almost as high — both are discussed in that file.
+### Chunking lab: eight strategies, one interface
 
-Embeddings need **`OPENAI_API_KEY`**; a DeepSeek-only deployment still serves
-every other flow, and this endpoint returns a clear 500.
+`app/embedding_pipeline/chunking/` puts eight chunkers behind one `Chunker` ABC
+so the structural default can be measured against alternatives instead of
+asserted. Nothing here is persisted — it is an analysis surface.
+
+| Strategy | What it does | Ingestion cost |
+| --- | --- | --- |
+| `structural` | One component = one chunk, with the contextual header. The ingest default. | free |
+| `fixed_size` | 512-token window, 80 overlap. The degenerate baseline. | free |
+| `recursive` | Separator hierarchy: blank line → line → sentence → word. | free |
+| `sentence_window` | Index a sentence, carry ±2 sentences in `metadata.window_text`. | free after the NLTK download |
+| `hierarchical` | Parent (whole budget) + child (component) levels linked by `parent_chunk_id`. | free |
+| `semantic` | Cut where consecutive-sentence similarity drops. | one embedding pass |
+| `propositional` | An LLM decomposes each component into atomic propositions. | one LLM call per component |
+| `contextual_retrieval` | A Claude call situates each chunk in its parent budget, prompt-cached. | one LLM call per component |
+
+```shell
+POST /embeddings/compare
+{"budgets": [...], "queries": ["OAuth authentication"], "strategies": ["recursive"], "top_k": 3}
+→ 200 {"stats_per_strategy": {...}, "queries_per_strategy": {...}}
+```
+
+`400` for an unknown strategy, `500` when a requested strategy's provider key is
+missing, `422` on the body. Five of the eight strategies call no provider:
+
+```shell
+uv run python scripts/compare_chunkers.py \
+  --strategies structural,fixed_size,recursive,sentence_window,hierarchical --show-stats
+```
+
+`--strategies all` adds the three that bill (`semantic`, `propositional`,
+`contextual_retrieval`). To regenerate the recorded report — the exact command
+used for the file below, ~$0.0075 and two minutes without an Anthropic key:
+
+```shell
+uv run python scripts/compare_chunkers.py --strategies all --queries all \
+  --show-stats --show-cost --output app/embedding_pipeline/COMPARISON_REPORT.md
+```
+
+The result is [`app/embedding_pipeline/COMPARISON_REPORT.md`](app/embedding_pipeline/COMPARISON_REPORT.md):
+seven strategies over 17 budgets, with corpus statistics and the top-3 chunks per
+query. `contextual_retrieval` is listed there as **not run** because this
+deployment has no `ANTHROPIC_API_KEY`; adding one completes the table.
+
+`--models small-1536,small-768` compares Matryoshka embedding dimensions. It is
+wired but **not used** for the stored corpus: the pgvector column is fixed at
+`vector(1536)`, so a trimmed vector could not be persisted.
 
 ## Data ingestion (Session 7, extension)
 
@@ -340,14 +403,18 @@ With the seed corpus: 6 records parsed → 5 rows after dedup → **3 documents*
 the negative-amount budget is discarded, the `TBD` client row is quarantined, and
 9 PII entities are pseudonymized.
 
-**Storage.** Two tables, `ingestion_jobs` and `pseudonym_mappings`. Parsed
-documents are counted, not stored — persistence of documents and vectors is a
-later phase. Compose runs Postgres (`pgvector/pgvector:pg16`, host port 5433);
-otherwise `DATABASE_URL` defaults to a SQLite file at `var/estimator.db`, so tests
-and a plain `uvicorn` run need no database.
+**Storage.** Ingestion writes two tables, `ingestion_jobs` and
+`pseudonym_mappings`; the parsed `Document`s themselves are counted, not stored.
+The vector store is a separate concern — see the embeddings section above for
+`documents` and `chunks`, which *are* persisted.
+
+Compose runs Postgres (`pgvector/pgvector:pg16`, host port 5433). Outside compose
+`DATABASE_URL` defaults to a SQLite file at `var/estimator.db`, so the test suite
+and a plain `uvicorn` run need no database — but the vector endpoints are
+Postgres-only and return a generic 500 on SQLite.
 
 ```shell
-uv run alembic upgrade head          # create the two tables
+uv run alembic upgrade head          # creates all four tables on Postgres
 uv run python -m app.ingestion.architecture   # CAG vs RAG decision, for Proyecto 2
 ```
 

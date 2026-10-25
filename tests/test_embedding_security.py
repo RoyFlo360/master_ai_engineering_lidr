@@ -16,9 +16,8 @@ import app.embedding_pipeline.embedder as embedder_module
 from app.embedding_pipeline.chunker import JSONStructuralChunker
 from app.embedding_pipeline.embedder import OpenAIEmbedder
 from app.embedding_pipeline.schemas import (
-    MAX_BUDGETS_PER_REQUEST,
-    MAX_CHUNKS_PER_REQUEST,
     MAX_DESCRIPTION_CHARS,
+    MAX_SOURCE_PATH_CHARS,
     Budget,
     Chunk,
     IngestRequest,
@@ -51,23 +50,28 @@ def budget(budget_id: str, components: list[dict]) -> dict:
     }
 
 
-def test_total_chunk_cap_is_enforced() -> None:
-    budgets = [
-        budget(f"BUD-{n}", [component(f"C-{n}-{i}") for i in range(100)])
-        for n in range(6)
-    ]
-    assert 6 * 100 > MAX_CHUNKS_PER_REQUEST
-    with pytest.raises(ValidationError, match="cap"):
-        IngestRequest.model_validate({"budgets": budgets})
-
-
-def test_budget_count_cap_is_enforced() -> None:
-    budgets = [
-        budget(f"BUD-{n}", [component("C-1")])
-        for n in range(MAX_BUDGETS_PER_REQUEST + 1)
-    ]
+def test_source_path_cap_is_enforced_at_the_request_boundary() -> None:
+    """`source_path` is stored and used as the uniqueness key, so it is bounded."""
     with pytest.raises(ValidationError):
-        IngestRequest.model_validate({"budgets": budgets})
+        IngestRequest.model_validate(
+            {
+                "source_path": "x" * (MAX_SOURCE_PATH_CHARS + 1),
+                "document_type": "historical_budget",
+                "content": budget("BUD-1", [component("C-1")]),
+            }
+        )
+
+
+def test_source_path_rejects_control_characters() -> None:
+    for bad in ("a\tb", "a\nb", "a\x00b", " pad "):
+        with pytest.raises(ValidationError):
+            IngestRequest.model_validate(
+                {
+                    "source_path": bad,
+                    "document_type": "historical_budget",
+                    "content": budget("BUD-1", [component("C-1")]),
+                }
+            )
 
 
 def test_component_count_per_budget_is_capped() -> None:
@@ -95,13 +99,6 @@ def test_unknown_fields_are_rejected_at_every_level() -> None:
                 "BUD-1",
                 [{**component("C-1"), "extra": 1}],
             )
-        )
-
-
-def test_duplicate_budget_ids_are_rejected() -> None:
-    with pytest.raises(ValidationError, match="budget_id"):
-        IngestRequest.model_validate(
-            {"budgets": [budget("BUD-1", [component("C-1")])] * 2}
         )
 
 

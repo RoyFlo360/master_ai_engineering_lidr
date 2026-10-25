@@ -11,16 +11,18 @@ transcription) into a software project estimation. An exact-match Redis cache si
 in front of the LLM (Cache Augmented Generation), so replaying an identical prompt
 costs nothing. Three Streamlit apps are HTTP clients of that service.
 
-This is a learning/course project: one process, no auth, no database, no
-multi-tenancy. Prefer small, clear, tested changes over generality. Nothing here
-is expected to survive a restart.
+This is a learning/course project: one process, no auth, no multi-tenancy. Prefer
+small, clear, tested changes over generality. In-process state (sessions, the
+usage ledger) is still disposable, but since Session 7 there are two databases:
+ingestion jobs and pseudonym mappings, and — since Session 8 — the pgvector
+`documents`/`chunks` store. Those two survive a restart; nothing else does.
 
 ## Layout
 
 ```
-app/main.py                    FastAPI app, CORS, /health, lifespan; mounts both routers
+app/main.py                    FastAPI app, CORS, /health, lifespan; mounts the estimations, sessions, embeddings, search and ingestion routers
 app/config.py                  Settings (pydantic-settings, reads root .env)
-app/dependencies.py            lru_cache factories: get_cache, get_llm_wrapper, get_usage_ledger, get_openai_client (None without OPENAI_API_KEY), get_semantic_cache (None unless Redis has RediSearch), get_estimation_service, get_session_store
+app/dependencies.py            lru_cache factories: get_cache, get_llm_wrapper, get_usage_ledger, get_openai_client (None without OPENAI_API_KEY), get_semantic_cache (None unless Redis has RediSearch), get_estimation_service, get_session_store; plus chunk_store / rag_ingest_service / semantic_retriever (None without a key, a Postgres URL and a 1536-dim model) and the eight chunker factories behind build_chunkers/ALL_STRATEGIES
 app/routers/estimations.py     the transcription + typed-v1 HTTP endpoints
 app/routers/sessions.py        conversational endpoints: POST /sessions, POST /sessions/{id}/estimate, POST /sessions/{id}/estimate-acb, GET /sessions/{id}
 app/schemas/estimation_schema.py      transcription request, TokenUsage, EstimationResponse (legacy shape)
@@ -48,16 +50,17 @@ app/guardrails/input.py        moderation + prompt-injection + PII checks
 app/guardrails/output.py       enforce_scope_response low-confidence filter
 app/context/examples.py        reference examples for the LEGACY flows
 app/prompts/loader.py          Jinja2 loader; prompts live at <use_case>/<version>/<role>.j2
-app/embedding_pipeline/        Session 7 embeddings: schemas, chunker, embedder, router, SANITY_CHECK.md
+app/embedding_pipeline/        embeddings + RAG: schemas, chunker, chunking/ (Chunker ABC + 8 strategies), analysis/ (cosine, comparator), embedder, ingest_service, retriever, router, search_router, store/ (pgvector ORM + repository), SANITY_CHECK.md, COMPARISON_REPORT.md
 app/ingestion/                 Session 7 (extension) data ingestion: catalog, parsers, cleaning, pii, orchestrator, architecture
 app/persistence/               Session 7 (extension) SQLAlchemy models + repositories (jobs, pseudonym mappings)
 app/routers/ingestion.py       POST /api/v1/ingestion/runs + GET /api/v1/ingestion/jobs/{id}
 app/schemas/ingestion.py       ingestion HTTP request/response shapes
 scripts/compare.py             cosine similarity CLI for the embedding sanity check
-data/budgets_sample.json       15 normalized budgets -> 52 chunks (Track B)
+scripts/compare_chunkers.py    chunking-strategy comparison CLI (writes COMPARISON_REPORT.md)
+data/budgets_sample.json       17 normalized budgets -> 60 chunks (Track B)
 data/catalog/catalog.yaml      audited sources with include/review/exclude decisions (Track A)
 data/seed/                     budgets, transcripts and the excluded rate card (Track A)
-alembic/                       one migration: pseudonym_mappings + ingestion_jobs
+alembic/                       two migrations: pseudonym_mappings + ingestion_jobs; documents + chunks (Postgres-only)
 docs/                          architecture, stack, flows, data model, operations, glossary, decisions
 rules/                         development, API, testing, QA, security and documentation rules
 app/prompts/estimation/v1/     system.j2, user.j2, examples.j2  (the typed v1 flow)
@@ -71,9 +74,9 @@ streamlit_app_estimation_api.py  JSON client for /estimate
 streamlit_app_loader.py        two-tab client: typed /new-estimate + conversational /sessions — the one compose runs
 evals/                         golden-set harness: dataset.py, metrics.py, run.py (CLI), golden_dataset.json (16 cases)
 evals/stress/                  Session-6 stress harness: scenarios.py, metrics.py, run.py, analyze.py, fixtures/build_pdfs.py, REPORT.md
-tests/                         hermetic pytest suite (260 passing today, no network, no .env); conftest.py + factories.py hold the fakes
-specs/                         spec-driven decisions, numbered (001–008 all Implemented); README.md explains the convention
-MISSING.md                     gap analysis vs. the reference `ai-engineering/estimator` project
+tests/                         hermetic pytest suite (639 passing today + 18 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
+specs/                         spec-driven decisions, numbered 001–013; README.md explains the convention. 012 is Implemented, 013 is Implemented for the chunking lab with runtime model config deferred
+MISSING-session{6,7,8}.md      gap analyses vs. the reference `ai-engineering/estimator` project, one per session
 Dockerfile                     python:3.14-slim; uv sync --frozen --no-install-project; one image serves both api and streamlit
 docker-compose.yml             redis-stack:7.4.0-v0 + api + streamlit; repo bind-mounted at /srv/app
 .streamlit/config.toml         Streamlit runOnSave (Streamlit reads only .streamlit/, never a root config.toml)
@@ -109,7 +112,9 @@ other two clients are run by hand.
 - `POST /sessions/{session_id}/estimate` — multipart form (transcript 20–80k chars + optional PDF/DOCX + optional `tier`) → `StructuredEstimationResponse` (with `observation`); 404 unknown session, 400 input guardrail, 415 unsupported attachment, 422 unreadable attachment / bad form field, 502 upstream
 - `POST /sessions/{session_id}/estimate-acb` — same contract, run through the Actor-Critic-Boss loop → `ACBResponse` (structured response + `acb: BossTrace`)
 - `GET /sessions/{session_id}` — session metadata + history length + `anchors_count`, `summary_chars`, `last_resolved_tier`, `last_tier_rule`, and the memory itself (`summary` text + `anchor_texts`)
-- `POST /embeddings/ingest` — `{budgets: [...]}` → `{chunks: [EmbeddedChunk], stats}`. **Note the prefix**: it is `/embeddings`, not `/api/v1`, because the Session-7 brief mandates that path. 422 on validation/caps, 500 generic when no OpenAI key or the provider fails
+- `POST /embeddings/ingest` — one document per request: `{source_path, document_type, content: <Budget>}` → `{document_id, chunks_created, embedding_dimension, ingestion_time_ms}`. Persists the document and its chunks in one transaction. Duplicate `source_path` → **409** with a top-level `{"detail": "Document already ingested", "document_id": N}`. 422 on validation, 500 generic when there is no OpenAI key, `DATABASE_URL` is not Postgres, or `EMBEDDING_MODEL` is not the 1536-dim model. **Prefix**: `/embeddings`, not `/api/v1`
+- `POST /embeddings/compare` — `{budgets, queries, strategies, top_k}` → `{stats_per_strategy, queries_per_strategy}`. Runs the eight chunkers over the same corpus and returns token stats plus top-k cosine per query. **Persists nothing.** 400 unknown strategy, 500 when a strategy's provider key is missing, 422 on the body. The three paid strategies (`semantic`, `propositional`, `contextual_retrieval`) bill during *ingestion*
+- `POST /search` — `{query, k}` (k 1–50, default 5) → `{query, k, search_time_ms, results[{chunk_id, document_id, chunk_type, content, distance, metadata}]}`. k-NN by cosine distance in SQL; sequential scan, no index. Empty corpus → 200 with `results: []`; 422 on bounds; 500 generic on failure. **Prefix**: unversioned, like `/embeddings`
 - `POST /api/v1/ingestion/runs` — `{source_name}` → **202** `{job_id, source_name, status}`; unknown source → 404, `review`/`exclude` source → 400
 - `GET /api/v1/ingestion/jobs/{job_id}` — job status, document count, error, timestamps; 404 if unknown
 - `GET /health`, `GET /docs`, `GET /redoc`
@@ -118,7 +123,7 @@ other two clients are run by hand.
 
 ```shell
 uv sync                                   # .venv from uv.lock
-uv run pytest -q                          # the whole suite (fast: ~3s)
+uv run pytest -q                          # the whole suite (fast: ~10s)
 uv run uvicorn app.main:app --reload      # API on :8000
 uv run streamlit run streamlit_app_loader.py
 
@@ -338,10 +343,11 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     network. In a clean container or CI the first call downloads the BPE file once.
     A module-level `encoding_for_model(...)` would make test collection depend on
     that download.
-34. **The embedding pipeline persists nothing.** Vectors are returned in the
-    response and discarded; `POST /embeddings/ingest` writes no row, touches no
-    Redis key and records nothing in the usage ledger. Persistence is the retrieval
-    phase.
+34. **The embedding pipeline persists in Postgres, in one transaction.**
+    `POST /embeddings/ingest` writes a `documents` row plus its `chunks`; an
+    embedder failure rolls the whole thing back — no orphan document. It still
+    touches no Redis key and records nothing in the usage ledger, so embedding
+    spend never appears in `GET /api/v1/usage`.
 35. **The embedding API can return fewer vectors than it was given.** The reference
     `zip`ped silently and dropped chunks; `embedder.embed_many` raises
     `EmbeddingCountMismatchError` instead, because attaching vectors by position
@@ -408,3 +414,62 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
 48. **Compose runs migrations on boot.** The `api` command is
     `alembic upgrade head && uvicorn …`, so a schema error surfaces as a
     container that never becomes healthy rather than a 500 on first request.
+
+49. **The vector tables live on their own declarative base.** `RagBase` in
+    `app/embedding_pipeline/store/models.py`, not `app.persistence.models.Base`.
+    The ingestion tests build a temp SQLite database with
+    `Base.metadata.create_all()`; a `Vector` column there raises `CompileError`.
+    `tests/test_rag_store_models.py` asserts `Base.metadata` has no vector column.
+50. **`0002_rag_pgvector` returns early on a non-Postgres connection.** A host
+    `alembic upgrade head` against SQLite creates only the ingestion tables.
+    `alembic check` on SQLite reports a diff — expected, not a bug.
+51. **`documents.source_path` is unique.** The application check produces the
+    friendly 409; the unique index is the guarantee under concurrency. An
+    `IntegrityError` is re-read in a fresh session and mapped to the same 409.
+52. **`vector(1536)` is hard-coded.** `EMBEDDING_DIMENSIONS` is the single source
+    of truth, and `/embeddings/ingest` + `/search` are disabled (generic 500) when
+    `EMBEDDING_MODEL` is not `text-embedding-3-small`. A mismatched provider
+    response is refused before the write.
+53. **No vector index exists, deliberately.** The sequential scan is the baseline
+    the live session measures HNSW against; adding one changes that baseline.
+54. **Two database stacks, one URL.** The async engine derives `+asyncpg` from
+    `DATABASE_URL`; handing the `+psycopg` URL to `create_async_engine` fails.
+    Both engines are lazy and cached per URL — importing
+    `app.persistence.database` opens nothing.
+55. **`/search` is unversioned, like `/embeddings/ingest`.** The Session-8 brief
+    mandates the path. Do not move either under `/api/v1`.
+56. **`metadata_` is the Python attribute; the column is `"metadata"`.** SQLAlchemy
+    reserves `metadata` on declarative models.
+57. **The default test suite never reaches Postgres.** The RAG integration tests
+    are marked `postgres` and skip without `TEST_DATABASE_URL`; they use
+    `NullPool` because `asyncio.run` creates a fresh event loop per operation.
+58. **`scripts/query_examples.py` must reach `http://api:8000` inside
+    `docker compose run`.** A one-shot container cannot see the API on `localhost`.
+
+59. **`/embeddings/compare` is analysis, not ingest.** It persists nothing, touches
+    no cache and writes no ledger row. Do not route it through
+    `RagIngestService`.
+60. **Two chunking strategies cost real money during ingestion.** `propositional`
+    (one LLM call per component) and `contextual_retrieval` (one Claude call per
+    component, parent document prompt-cached) bill before a single query runs;
+    `semantic` embeds the corpus once. On 17 budgets that is ~$0.0075 and ~$0.14
+    respectively. `--strategies all` runs them.
+61. **The comparator chunks each strategy once and memoizes.** Asking for both
+    stats and top-k must not double the LLM calls; the memo is keyed on the
+    `budgets` list identity.
+62. **`app.embedding_pipeline.chunker` is a re-export, not the implementation.**
+    The structural chunker lives in `chunking/structural.py`; the old path stays
+    for the ingest service and the Session-7 tests. Its text template, metadata
+    keys and `chunk_id` are frozen — `tests/test_chunking_strategies.py` pins them.
+63. **`sentence_window` needs NLTK `punkt_tab`.** Missing data raises a
+    `RuntimeError` with the exact download command instead of an opaque
+    `LookupError`. Tests stub the tokenizer; the default suite never downloads.
+64. **`langchain-experimental` is sunset upstream.** It still works and still
+    ships `SemanticChunker`, but expect it to move or disappear; the strategy is
+    isolated in one module so that is a one-file change.
+65. **`--models` (Matryoshka 1536 vs 768) is wired but not used for the store.**
+    The pgvector column is `vector(1536)`, so a trimmed vector cannot be
+    persisted; the flag exists for the in-memory comparison only.
+66. **A missing provider key makes a strategy "not run", not a crash.** The CLI
+    records it in the report's *Strategies not run* table; the HTTP route returns
+    500 for the whole request instead.

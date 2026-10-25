@@ -31,6 +31,28 @@ The recipe:
 - **No log-string assertions mixed with behavioural ones.** Prefer asserting the
   returned object, the raised exception or the recorded fake call.
 
+## The vector store
+
+Three layers, three kinds of test:
+
+- **Schema introspection** (`tests/test_rag_store_models.py`) â€” no engine. Pins
+  `metadata_` â†’ `"metadata"`, the nullable `Vector(1536)`, the CASCADE FK, the
+  unique `source_path`, the absence of a vector index, and the fact that
+  `Base.metadata` carries no vector column.
+- **Fakes** (`tests/test_rag_ingest_service.py`, `tests/test_embeddings_api.py`,
+  `tests/test_search_endpoint.py`) â€” a fake store plus a fake embedder, or a fake
+  service behind `dependency_overrides`. No Postgres, no OpenAI. These cover the
+  order of operations, the duplicate guard, the rollback on an embedder failure,
+  the 409 body and every status mapping.
+- **Opt-in integration** (`tests/test_rag_postgres.py`, marked `postgres`, skipped
+  without `TEST_DATABASE_URL`) â€” the only place the real `vector` column, the
+  unique index, `cosine_distance` and `ON DELETE CASCADE` are exercised. It uses
+  `NullPool`: `asyncio.run` opens a fresh event loop per operation, and a pooled
+  asyncpg connection cannot be reused across loops.
+
+A new endpoint on this surface needs all three, and the default suite must stay
+free of Postgres and OpenAI.
+
 ## The four categories
 
 A new subsystem (the Session-7 embedding pipeline and ingestion pipeline included)

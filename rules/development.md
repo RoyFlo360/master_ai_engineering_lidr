@@ -35,6 +35,19 @@ recorded in their accepted specs:
   co-located, with the HTTP surface in `router.py` (spec 010).
 - `app/ingestion/` — catalog models and loading, document models, parsers, cleaning,
   PII handling and orchestration co-located, grouped by sub-package (spec 011).
+- `app/embedding_pipeline/store/` — the pgvector ORM models and the async
+  repository live beside the chunker and the embedder (spec 012).
+
+**Two declarative bases, deliberately.** `app.persistence.models.Base` holds the
+portable tables; `app.embedding_pipeline.store.models.RagBase` holds the
+Postgres-only vector tables. Never put a `Vector`, `JSONB` or `CREATE EXTENSION`
+construct on `Base`: the ingestion tests build a temporary SQLite database from
+`Base.metadata`, and a vector column there fails to compile. `alembic/env.py`
+targets both bases.
+
+**Caller-owned transactions.** A repository in the RAG store never opens,
+commits or rolls back a session; the service or retriever that owns the session
+does. That is what makes "one document, one transaction" true.
 
 The exceptions are bounded: HTTP still lives in a router module, no mock or test
 helper may be imported from either package at runtime, and imports point inward

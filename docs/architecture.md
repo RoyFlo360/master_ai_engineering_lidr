@@ -38,10 +38,10 @@ mount, so a standalone image without that mount would not have the compose clien
 Changes to `pyproject.toml`, `uv.lock` or `Dockerfile` need a rebuild; Python edits
 apply live.
 
-A Postgres container (`pgvector/pgvector:pg16`, host port 5433) backs the
-ingestion subsystem (spec 011). It holds two tables only: `pseudonym_mappings`
-and `ingestion_jobs`. The pgvector extension is present in the image but **not
-enabled** — vector storage is a later phase.
+A Postgres container (`pgvector/pgvector:pg16`, host port 5433) backs both
+persistence layers. It holds four tables: `pseudonym_mappings` and
+`ingestion_jobs` (ingestion, spec 011), plus `documents` and `chunks` with the
+`vector` extension enabled (the RAG store, spec 012).
 
 Outside compose the default `DATABASE_URL` is a SQLite file at `var/estimator.db`,
 so the test suite and a plain `uvicorn` run need no database. `DATABASE_URL` is
@@ -59,8 +59,12 @@ the only switch between the two; the SQL is portable.
 | `POST /sessions/{id}/estimate` | same router | `EstimationService.estimate_conversational`, attachments, guardrails, compression, metadata | `new_estimation_schema.py` | `get_estimation_service`, `get_session_store` |
 | `POST /sessions/{id}/estimate-acb` | same router | `EstimationService.estimate_with_acb` → `Boss` + `Critic` | `new_estimation_schema.py`, `acb.py`, `critic.py` | same |
 | `GET /health` | `app/main.py` | `Settings` | plain dict | none |
+| `POST /embeddings/ingest` | `app/embedding_pipeline/router.py` | `RagIngestService` → chunker + `OpenAIEmbedder` + `ChunkStore` (one transaction) | `app/embedding_pipeline/schemas.py` | `get_rag_ingest_service` |
+| `POST /embeddings/compare` | same router | `ChunkingComparator` → eight `Chunker` strategies + `OpenAIEmbedder` (nothing persisted) | `app/embedding_pipeline/analysis/comparison.py` | `get_embedder`, `build_chunkers` |
+| `POST /search` | `app/embedding_pipeline/search_router.py` | `SemanticRetriever` → embedder + `ChunkStore.search` | same module | `get_semantic_retriever` |
+| `POST /api/v1/ingestion/runs`, `GET /api/v1/ingestion/jobs/{id}` | `app/routers/ingestion.py` | `app/ingestion/orchestrator.py` + repositories | `app/schemas/ingestion.py` | catalog, loader, registry, job session factory |
 
-Nine paths appear in the OpenAPI document. `/docs` and `/redoc` are FastAPI's own
+Fourteen paths appear in the OpenAPI document. `/docs` and `/redoc` are FastAPI's own
 pages, served because `app/main.py` passes `docs_url` and `redoc_url` explicitly.
 
 ### Layering
@@ -161,6 +165,8 @@ Full step-by-step detail, including state and cost semantics, is in
 | Semantic cache index | Redis, index `estimations`, prefix `estimation:semantic` | survives | survives | shared |
 | Settings | `lru_cache`d per process | rebuilt | rebuilt | per worker |
 | Prompt templates | files under `app/prompts/` | survive | survive | shared |
+| Vector store (`documents`, `chunks`) | Postgres volume | survives | survives | shared |
+| Ingestion jobs, pseudonym mappings | Postgres volume (or `var/estimator.db`) | survives | survives | shared |
 | Browser state (`st.session_state`) | Streamlit process | lost | lost on rerun | per session |
 
 Two consequences worth remembering:
@@ -185,19 +191,44 @@ Two consequences worth remembering:
 | Auxiliary model provider fails | One retry on `AUX_FALLBACK_MODEL` for calls that pass `model_override` |
 | Streaming error mid-response | `error` SSE frame; the HTTP status was already 200 |
 
-## Session-7 subsystems
+## Session-7 and Session-8 subsystems
 
-Two subsystems were added in Session 7 and are part of the running service:
+Three subsystems were added after Session 6 and are part of the running service:
 
-- **Embedding pipeline** (spec [010](../specs/010-session-7-embedding-pipeline.md)) —
-  `app/embedding_pipeline/`, exposed as `POST /embeddings/ingest`. Chunks budget
-  components structurally, embeds them with `text-embedding-3-small`, returns the
-  vectors. Persists nothing.
+- **Embedding + vector store** (specs [010](../specs/010-session-7-embedding-pipeline.md),
+  [012](../specs/012-session-8-pgvector-and-search.md)) —
+  `app/embedding_pipeline/`, exposed as `POST /embeddings/ingest` and
+  `POST /search`. Chunks budget components structurally, embeds them with
+  `text-embedding-3-small`, and persists each budget as a `documents` row plus
+  its embedded `chunks` in **one transaction**. Retrieval is k-NN by cosine
+  distance in SQL, with a sequential scan and no vector index.
 - **Data ingestion** (spec [011](../specs/011-session-7-data-ingestion.md)) —
   `app/ingestion/` + `app/persistence/`, exposed as
   `POST /api/v1/ingestion/runs` and `GET /api/v1/ingestion/jobs/{job_id}`.
   Catalog-validated, cleaned, validated and pseudonymized parsing with a job row
   per run. Persists job rows and pseudonym mappings; not the documents.
 
-Both are described in `data-flows.md` §6–7. Neither touches the estimation,
-streaming, session or ACB paths.
+### Two database stacks, one URL
+
+`app/persistence/database.py` owns both:
+
+| Stack | Driver | Used by | Session helpers |
+| --- | --- | --- | --- |
+| sync | `psycopg` | ingestion jobs and mappings (BackgroundTasks, admin operations) | `get_engine`, `get_session_factory`, `SessionLocal`, `get_session` |
+| async | `asyncpg` | `/embeddings/ingest` and `/search` (real request path) | `get_async_engine`, `get_async_session_factory` |
+
+Both read `Settings.DATABASE_URL`; `_async_database_url()` swaps the driver token
+for the async stack, so there is one configuration value. Both engines are built
+**lazily** and cached per URL — importing the module opens nothing.
+
+### Two declarative bases, on purpose
+
+`app.persistence.models.Base` holds the portable ingestion tables (SQLite and
+Postgres). `app.embedding_pipeline.store.models.RagBase` holds the Postgres-only
+vector tables. A `Vector` column on the shared base would make
+`Base.metadata.create_all()` fail on SQLite, which is how the ingestion tests
+build their temporary database. `alembic/env.py` points `target_metadata` at both.
+
+Both stacks are described in `data-flows.md` §6–8. Neither touches the
+estimation, streaming, session or ACB paths: retrieval is its own endpoint and
+`EstimationService` does not consult the corpus yet.

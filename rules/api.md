@@ -8,12 +8,14 @@
 | Conversational session endpoints | `/sessions` | Current, unversioned |
 | Health | `/health` | Current |
 | OpenAPI UI | `/docs`, `/redoc` | Current |
-| Embedding ingest | `/embeddings` | Current, unversioned by mandate (spec 010) |
+| Embedding ingest | `/embeddings` | Current, unversioned by mandate (specs 010, 012) |
+| Semantic search | `/search` | Current, unversioned by mandate (spec 012) |
 | Ingestion runs and jobs | `/api/v1/ingestion` | Current (spec 011) |
 
 - New business endpoints go under `/api/v1`.
-- `/embeddings` is the one sanctioned exception: the Session-7 brief mandates
-  `POST /embeddings/ingest`, and the grader and live session call that path.
+- `/embeddings` and `/search` are the sanctioned exceptions: the Session 7 and 8
+  briefs mandate those exact paths, and the grader and live session call them.
+  Do not move them under `/api/v1`.
 - Ingestion error bodies are **flat** (`{"reason": ...}`), not nested under
   `detail`, because spec 011 promises that shape; the other routers use FastAPI's
   default. Both are deliberate — check the spec before "unifying" them.
@@ -39,6 +41,11 @@ Every route declares `response_model` except the SSE endpoint. See
 | `GET /sessions/{session_id}` | `SessionInfoResponse` (router-local) |
 | `POST /sessions/{session_id}/estimate` | `StructuredEstimationResponse` |
 | `POST /sessions/{session_id}/estimate-acb` | `ACBResponse` |
+| `POST /embeddings/ingest` | `IngestResponse` (declares a documented 409) |
+| `POST /embeddings/compare` | `CompareResponse` (stats + top-k per strategy) |
+| `POST /search` | `SearchResponse` |
+| `POST /api/v1/ingestion/runs` | `IngestionRunResponse` |
+| `GET /api/v1/ingestion/jobs/{job_id}` | `IngestionJobView` |
 | `GET /health` | plain `dict` |
 
 ## Status codes per endpoint
@@ -75,6 +82,8 @@ FastAPI's `HTTPException` produces `{"detail": ...}`. Four detail shapes are in 
 | Object | `{"detail": {"reason": "pii", "message": "..."}}` | 400 input guardrail |
 | Object with a filename | `{"detail": {"reason": "unsupported_attachment", "filename": "x.csv"}}` | 415 |
 | Object with a filename and message | `{"detail": {"reason": "attachment_extraction_failed", "filename": "x.pdf", "message": "..."}}` | 422 unreadable attachment |
+| Flat, top-level | `{"detail": "Document already ingested", "document_id": 42}` | 409 on `/embeddings/ingest` |
+| Flat, no `detail` key | `{"reason": "unknown_source"}` | ingestion 404/400 (spec 011) |
 
 Request-validation failures are FastAPI's own shape:
 `{"detail": [{"type": ..., "loc": [...], "msg": ..., "input": ...}]}`.
@@ -86,6 +95,9 @@ Rules:
 - Do not return provider exception text on a new endpoint. The legacy
   `POST /api/v1/estimate` does (`detail=str(exc)`); that is known debt, not a pattern.
 - Do not put prompt text, payload text, keys or file contents in an error body.
+- The 409 body on `/embeddings/ingest` is deliberately **top-level**
+  (`{"detail": ..., "document_id": N}`), matching the exercise statement; it is
+  the second sanctioned deviation after the ingestion flat bodies.
 
 ## 422 vs 400 vs 404 vs 500 vs 502
 

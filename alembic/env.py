@@ -10,8 +10,11 @@ The DB URL resolution order is:
    uses, so `alembic upgrade head` against the running service is always
    consistent with it.
 
-Migrations are discovered by importing ``app.persistence.models``: every model
-in that module registers itself on ``Base.metadata``.
+Migrations are discovered by importing the model modules: every SQLAlchemy model
+registered against a base's ``metadata`` becomes visible to Alembic's
+autogenerate. There are two bases on purpose — ``app.persistence.models.Base``
+(portable: SQLite and Postgres) and ``app.embedding_pipeline.store.models.RagBase``
+(Postgres-only pgvector tables) — so ``target_metadata`` is a sequence.
 
 ``fileConfig`` is skipped when the caller sets ``config.attributes["configure_logger"]
 = False`` — reconfiguring logging inside a pytest process would silence the rest
@@ -23,12 +26,21 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.dialects.postgresql.base import ischema_names
 
 from app.config import get_settings
-from app.persistence.models import Base  # noqa: F401 — registers the models
+from app.persistence.models import Base  # noqa: F401 — registers the portable models
+
+import app.embedding_pipeline.store.models  # noqa: F401,E402 — registers the S8 tables
 
 config = context.config
+
+# Teach reflection about the ``vector`` column type. Without this,
+# ``alembic check`` / autogenerate against a database that already holds vector
+# columns cannot map them back and produces inconsistent diffs.
+ischema_names["vector"] = Vector
 
 if config.config_file_name is not None and config.attributes.get(
     "configure_logger", True
@@ -50,7 +62,10 @@ def _resolve_url() -> str:
 # percent-encoded password would otherwise be interpolated.
 config.set_main_option("sqlalchemy.url", _resolve_url().replace("%", "%%"))
 
-target_metadata = Base.metadata
+target_metadata = [
+    Base.metadata,  # portable ingestion tables
+    app.embedding_pipeline.store.models.RagBase.metadata,  # Postgres-only vector store
+]
 
 
 def run_migrations_offline() -> None:

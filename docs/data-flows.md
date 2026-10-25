@@ -227,32 +227,105 @@ synthesized answer is identifiable after the fact.
 nothing and does not fail the request. Scanned or image-only PDFs therefore yield no
 text — there is no OCR step.
 
-## 6. Embedding pipeline — `POST /embeddings/ingest`
+## 6. Embedding ingest — `POST /embeddings/ingest`
 
 **Entry.** `app/embedding_pipeline/router.py::ingest`, body
-`IngestRequest{budgets: [Budget]}`, 1–100 budgets, at most 500 chunks total.
+`IngestRequest{source_path, document_type, content: Budget}` — **one document per
+request**.
 
 **Steps.**
 
 ```text
 request
-  -> Pydantic validation       422 on bad enum/range/unknown field/duplicate id/cap
-  -> JSONStructuralChunker     one component = one Chunk (contextual header)
-  -> OpenAIEmbedder.embed_many 100 chunks per call, rate-limit retries 1s/2s/4s
-  -> IngestStats               total_budgets, total_chunks, total_tokens, cost
-  -> 200 {chunks, stats}
+  -> Pydantic validation           422 on bad enum/range/unknown field/bad source_path
+  -> RagIngestService.ingest       one AsyncSession, one transaction
+       1. find_document_id         409 when source_path is already ingested
+       2. JSONStructuralChunker    one component = one Chunk (contextual header)
+       3. embed_many (in a thread) 100 chunks per call, rate-limit retries 1s/2s/4s
+       4. persist_document_with_chunks   documents row (flush) + chunks (add_all)
+       5. commit on scope exit
+  -> 200 {document_id, chunks_created, embedding_dimension, ingestion_time_ms}
 ```
 
-**State touched.** None. No cache entry, no ledger row, no database write; the
-vectors exist only in the response.
+**State touched.** `documents` and `chunks` in Postgres, written atomically. No
+cache entry and no ledger row — embedding spend is not recorded in
+`GET /api/v1/usage`.
 
-**Cost.** `tokens / 1_000_000 * 0.02`. The 15-budget sample is 52 chunks and
-4,126 tokens (about $0.0000825).
+**Transaction guarantee.** An embedder failure rolls back the whole transaction:
+no `documents` row survives without its chunks. A 768-dim provider response is
+refused before the write (`EmbeddingDimensionMismatch`), because a mismatched
+vector would make every later distance meaningless.
 
-**Failure modes.** 422 for validation; 500 with a generic body when no
-`OPENAI_API_KEY` is configured or the provider fails. Details go to the log only.
+**Duplicates.** The application check produces the friendly `409`; the **unique
+index** on `documents.source_path` is the guarantee. A concurrent duplicate that
+slips past the check raises `IntegrityError`, which is re-read in a fresh session
+and mapped to the same `409` body.
 
-## 7. Data ingestion — `/api/v1/ingestion`
+**Failure modes.** 422 for validation; 500 `"Embedding service is not
+available."` when no `OPENAI_API_KEY`, a non-Postgres `DATABASE_URL`, or a
+non-1536 `EMBEDDING_MODEL`; 500 `"Failed to generate embeddings."` for a provider
+or database failure. Details go to the log only.
+
+## 7. Semantic search — `POST /search`
+
+**Entry.** `app/embedding_pipeline/search_router.py::search`, body
+`SearchRequest{query, k}` with `k` in `1..50` (default 5).
+
+**Steps.**
+
+```text
+request
+  -> Pydantic validation       422 when k is out of bounds or the query is empty
+  -> OpenAIEmbedder.embed_one  in a thread; same model used at ingest time
+  -> ChunkStore.search         SELECT ... embedding <=> :query AS distance
+                               ORDER BY distance LIMIT k   (sequential scan)
+  -> 200 {query, k, search_time_ms, results[]}
+```
+
+**State touched.** Read-only. An empty corpus is a `200` with `results: []`.
+
+**Why cosine.** OpenAI embeddings are normalized, so L2 and inner product would
+rank identically. Cosine is chosen to match the `vector_cosine_ops` operator
+class of the HNSW index a later phase adds — an operator/index mismatch makes
+Postgres ignore the index silently.
+
+**Deliberately absent.** No vector index (the sequential scan is the baseline the
+live session measures), no metadata filters, no hybrid search, no reranking, and
+no integration into `EstimationService.estimate()`.
+
+## 8. Chunking comparison — `POST /embeddings/compare`
+
+**Entry.** `app/embedding_pipeline/router.py::compare`, body
+`CompareRequest{budgets, queries, strategies, top_k}`.
+
+**Steps.**
+
+```text
+request
+  -> build_chunkers(names)       400 unknown strategy / 500 missing provider key
+  -> ChunkingComparator           chunk each strategy ONCE, memoized
+       -> stats                 n_chunks, token min/p50/p95/max, orphans, obese,
+                                ingestion cost and seconds
+       -> run_queries           embed the queries and every chunk, cosine, top-k
+  -> 200 {stats_per_strategy, queries_per_strategy}
+```
+
+**State touched.** None. This is analysis: no database write, no cache entry, no
+ledger row. It is the one place where eight chunkers can be compared on the same
+corpus without touching the stored vectors.
+
+**Cost.** Three strategies pay during *ingestion*, before any query runs:
+`semantic` embeds the whole corpus once, `propositional` makes one LLM call per
+component, and `contextual_retrieval` makes one Claude call per component with
+the parent document cached. On the 17-budget sample that is ~$0.0075 for the
+first two and ~$0.14 for the third. The other five are free.
+
+**Failure modes.** 422 on the body or caps; 400 on an unknown strategy; 500 when
+a requested strategy's provider key is missing (the CLI records that strategy as
+"not run" instead of aborting the whole report); 500 on any chunking or embedding
+failure, with the reason in the log only.
+
+## 9. Data ingestion — `/api/v1/ingestion`
 
 **Entries.** `POST /api/v1/ingestion/runs` (202 + job id) and
 `GET /api/v1/ingestion/jobs/{job_id}`.
@@ -288,8 +361,8 @@ message — the client already has its 202 and cannot see it there.
 
 ## Planned flows
 
-Vector persistence and retrieval (pgvector) are not implemented. The embedding
-endpoint returns vectors and discards them; the ingestion endpoint stores jobs
-and mappings, never documents. Both are follow-ups in specs
-[010](../specs/010-session-7-embedding-pipeline.md) and
-[011](../specs/011-session-7-data-ingestion.md).
+Retrieval inside the estimation prompt is not implemented: `/search` is its own
+endpoint and `EstimationService` does not consult the corpus yet. Vector indexes
+(HNSW/IVFFlat), metadata filters, hybrid search and Postgres tuning are the live
+session's work, not this repository's. See spec
+[012](../specs/012-session-8-pgvector-and-search.md).

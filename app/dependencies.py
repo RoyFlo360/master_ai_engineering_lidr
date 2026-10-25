@@ -9,8 +9,22 @@ from redis import from_url
 from structlog import get_logger
 
 from app.config import get_settings
+from app.embedding_pipeline.chunking.base import Chunker
 from app.embedding_pipeline.chunker import JSONStructuralChunker
-from app.embedding_pipeline.embedder import OpenAIEmbedder
+from app.embedding_pipeline.chunking.strategies import (
+    ContextualRetrievalChunker,
+    FixedSizeChunker,
+    HierarchicalChunker,
+    PropositionalChunker,
+    RecursiveChunker,
+    SemanticChunker,
+    SentenceWindowChunker,
+)
+from app.embedding_pipeline.embedder import MODEL as EMBEDDING_MODEL_NAME, OpenAIEmbedder
+from app.embedding_pipeline.ingest_service import RagIngestService
+from app.embedding_pipeline.retriever import SemanticRetriever
+from app.embedding_pipeline.store.repository import ChunkStore
+from app.persistence.database import get_async_session_factory, is_postgres_url
 from app.services.cache import EstimationCache
 from app.services.estimation import EstimationService
 from app.services.llm_wrapper import LLMWrapper
@@ -51,6 +65,98 @@ def get_chunker() -> JSONStructuralChunker:
     return JSONStructuralChunker()
 
 
+# --- Session 8 (Track B): one factory per chunking strategy -----------------
+# The no-API strategies are plain singletons. The LLM-backed ones raise a clear
+# RuntimeError when their key is missing; the comparison route maps that to a 500
+# and an unknown name to a 400.
+
+
+@lru_cache
+def get_anthropic_client():
+    """Lazy Anthropic client. ``None`` when no API key is configured."""
+    settings = get_settings()
+    if not settings.ANTHROPIC_API_KEY:
+        return None
+    import anthropic
+
+    return anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+
+@lru_cache
+def get_fixed_size_chunker() -> FixedSizeChunker:
+    return FixedSizeChunker()
+
+
+@lru_cache
+def get_recursive_chunker() -> RecursiveChunker:
+    return RecursiveChunker()
+
+
+@lru_cache
+def get_sentence_window_chunker() -> SentenceWindowChunker:
+    return SentenceWindowChunker()
+
+
+@lru_cache
+def get_hierarchical_chunker() -> HierarchicalChunker:
+    return HierarchicalChunker()
+
+
+@lru_cache
+def get_semantic_chunker() -> SemanticChunker:
+    settings = get_settings()
+    # Raises RuntimeError with an actionable message when the key is missing.
+    return SemanticChunker(api_key=settings.OPENAI_API_KEY, model=settings.EMBEDDING_MODEL)
+
+
+# NOT @lru_cache: these are rebuilt per comparison request (construction is cheap;
+# the underlying API clients stay singletons).
+def get_propositional_chunker() -> PropositionalChunker:
+    client = get_openai_client()
+    if client is None:
+        raise RuntimeError("PropositionalChunker requires OPENAI_API_KEY.")
+    return PropositionalChunker(client=client)
+
+
+def get_contextual_retrieval_chunker() -> ContextualRetrievalChunker:
+    client = get_anthropic_client()
+    if client is None:
+        raise RuntimeError("ContextualRetrievalChunker requires ANTHROPIC_API_KEY.")
+    return ContextualRetrievalChunker(client=client)
+
+
+# Registry: strategy name -> factory. ``structural`` reuses ``get_chunker``.
+# This order is the canonical comparison order used by "all".
+CHUNKER_FACTORIES: dict[str, object] = {
+    "structural": get_chunker,
+    "fixed_size": get_fixed_size_chunker,
+    "recursive": get_recursive_chunker,
+    "sentence_window": get_sentence_window_chunker,
+    "semantic": get_semantic_chunker,
+    "propositional": get_propositional_chunker,
+    "contextual_retrieval": get_contextual_retrieval_chunker,
+    "hierarchical": get_hierarchical_chunker,
+}
+
+#: Canonical strategy order; ``"all"`` means exactly this list.
+ALL_STRATEGIES: list[str] = list(CHUNKER_FACTORIES)
+
+
+def build_chunkers(names: list[str]) -> list[Chunker]:
+    """Instantiate the requested chunkers by name.
+
+    Raises ``KeyError`` for an unknown strategy (mapped to 400) and
+    ``RuntimeError`` for one whose API key is missing (mapped to 500).
+    """
+    chunkers: list[Chunker] = []
+    for name in names:
+        factory = CHUNKER_FACTORIES.get(name)
+        if factory is None:
+            raise KeyError(name)
+        chunkers.append(factory())  # type: ignore[operator]
+    return chunkers
+
+
 @lru_cache
 def get_embedder() -> OpenAIEmbedder | None:
     """OpenAI embedder for the embedding pipeline.
@@ -65,6 +171,81 @@ def get_embedder() -> OpenAIEmbedder | None:
         log.warning("embedder_disabled", reason="no_openai_key")
         return None
     return OpenAIEmbedder(client=client, model=settings.EMBEDDING_MODEL)
+
+
+# --- Session 8: pgvector persistence + semantic search ---------------------
+
+
+def vector_store_problem() -> str | None:
+    """Why the vector store cannot be used right now, or ``None`` when it can.
+
+    Three conditions make every stored distance meaningless or the schema
+    unwritable, so they are refused up front instead of failing deep inside a
+    request:
+
+    * ``DATABASE_URL`` is not Postgres (the default is SQLite for the tests);
+    * ``EMBEDDING_MODEL`` is not the 1536-dim model the column pins;
+    * pgvector is not importable (a partial install).
+
+    Returned as a reason string so the routers can log it while sending the
+    client a generic 500.
+    """
+    settings = get_settings()
+    if not is_postgres_url(settings.DATABASE_URL):
+        return "database_not_postgres"
+    if settings.EMBEDDING_MODEL != EMBEDDING_MODEL_NAME:
+        return "embedding_model_dimension_mismatch"
+    try:
+        import pgvector.sqlalchemy  # noqa: F401
+    except ImportError:  # pragma: no cover - a broken install, not a code path
+        return "pgvector_missing"
+    return None
+
+
+@lru_cache
+def get_chunk_store() -> ChunkStore:
+    """Stateless async data-access layer over documents/chunks."""
+    return ChunkStore()
+
+
+@lru_cache
+def get_rag_ingest_service() -> RagIngestService | None:
+    """Chunk -> embed -> persist orchestration.
+
+    ``None`` when the service cannot work at all: no OpenAI key (embeddings),
+    a non-Postgres database (pgvector schema), or a mismatched embedding model.
+    The router maps that to a generic 500 and the reason to the log.
+    """
+    embedder = get_embedder()
+    if embedder is None:
+        return None
+    problem = vector_store_problem()
+    if problem is not None:
+        log.warning("rag_ingest_service_disabled", reason=problem)
+        return None
+    return RagIngestService(
+        chunker=get_chunker(),
+        embedder=embedder,
+        session_factory=get_async_session_factory(),
+        store=get_chunk_store(),
+    )
+
+
+@lru_cache
+def get_semantic_retriever() -> SemanticRetriever | None:
+    """Query-side counterpart of the ingest service. Same ``None`` contract."""
+    embedder = get_embedder()
+    if embedder is None:
+        return None
+    problem = vector_store_problem()
+    if problem is not None:
+        log.warning("semantic_retriever_disabled", reason=problem)
+        return None
+    return SemanticRetriever(
+        embedder=embedder,
+        session_factory=get_async_session_factory(),
+        store=get_chunk_store(),
+    )
 
 
 @lru_cache

@@ -25,7 +25,11 @@ uv run pytest tests/test_sessions_api.py -q
 # 17 passed in 0.84s
 
 uv run pytest -q
-# 261 passed, 1 warning in 1.71s   (recorded before the docs layer; report your own run)
+# 639 passed, 18 skipped, 1 warning in 10s   (Session 8 baseline; report your own run)
+
+$env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
+uv run pytest -q
+# 613 passed, 1 warning in 16s   (adds the opt-in Postgres modules)
 ```
 
 Rules:

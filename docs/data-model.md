@@ -190,10 +190,93 @@ there is one usage shape across both.
 | Attachment text | 60,000 characters each (`MAX_ATTACHMENT_CHARS`) |
 | Critic issues per review | 12 |
 
-## Not yet modelled
+## Embedding and retrieval shapes
 
-`Document`, `Chunk`, `EmbeddedChunk`, `IngestRequest`, `IngestResponse`, the catalog
-models and the persistence tables belong to the in-progress Session-7 work (specs
-[010](../specs/010-session-7-embedding-pipeline.md),
-[011](../specs/011-session-7-data-ingestion.md)). They do not exist in the running
-service and are not documented here.
+`app/embedding_pipeline/schemas.py`. The request models forbid unknown fields:
+this surface is unauthenticated and every chunk costs money to embed.
+
+### `Budget` and `BudgetComponent` — the corpus format
+
+```text
+Budget{budget_id, client_metadata{name, sector, country}, project_summary,
+       main_technology, year, total_estimated_hours, components[1..100]}
+BudgetComponent{component_id, name, description, tech_stack[], estimated_hours,
+                complexity, dependencies[]}
+```
+
+`sector` is a closed universe (`finance | ecommerce | healthcare | industrial`)
+and so is `complexity` (`low | medium | high`); a typo fails validation instead
+of leaking into the metadata future filters query. `component_id` values must be
+unique inside a budget, because `chunk_id` is `"{budget_id}::{component_id}"`.
+
+### `Chunk` and `EmbeddedChunk` — the pipeline's internal unit
+
+```text
+Chunk{chunk_id, text, metadata{}, token_count}
+EmbeddedChunk = Chunk + embedding[1536]
+```
+
+`text` is what the embedder sees; `metadata` travels alongside and is never
+embedded. `chunk_id` is the traceable corpus id — **not** the database id.
+
+### `IngestRequest` / `IngestResponse` — `POST /embeddings/ingest`
+
+```text
+IngestRequest{source_path (≤512, no control chars), document_type (≤50),
+              content: Budget}
+IngestResponse{document_id, chunks_created, embedding_dimension, ingestion_time_ms}
+```
+
+One request is one document. `source_path` is provenance and the uniqueness key,
+not a file that is read.
+
+### `SearchRequest` / `SearchHit` / `SearchResponse` — `POST /search`
+
+```text
+SearchRequest{query (≤2,000), k (1..50, default 5)}
+SearchHit{chunk_id, document_id, chunk_type, content, distance, metadata}
+SearchResponse{query, k, search_time_ms, results[]}
+```
+
+`distance` is cosine **distance** (lower = closer). `SearchHit.chunk_id` is the
+database primary key; the `BUD-…::COMP-…` id lives in `metadata`.
+
+## Chunking-comparison shapes
+
+`app/embedding_pipeline/analysis/comparison.py`, used by
+`POST /embeddings/compare` and the CLI.
+
+```text
+CompareRequest{budgets[1..100], queries[], strategies[], top_k (1..10, default 3)}
+ChunkingStats{strategy, n_chunks, token_distribution{min, p50, p95, max},
+              n_orphan_chunks, n_obese_chunks, ingestion_cost_usd, ingestion_seconds}
+TopChunk{chunk_id, cosine, text_preview}
+QueryResult{strategy, query, top_k[TopChunk]}
+CompareResponse{stats_per_strategy{}, queries_per_strategy{}}
+```
+
+`top_k` is capped at 10 in the request and defaults to 3. `strategies` empty
+means "every registered strategy". Orphans are chunks under 20 tokens; obese are
+over 800.
+
+## Vector-store rows
+
+`app/embedding_pipeline/store/models.py`, on their own declarative base
+(`RagBase`) because they are Postgres-only.
+
+```text
+documents{id, source_path (UNIQUE), document_type, ingested_at, metadata JSONB}
+chunks{id, document_id → documents.id ON DELETE CASCADE, chunk_type, content,
+       embedding vector(1536) NULL, metadata JSONB, created_at}
+```
+
+Indexes: unique `source_path`, `chunk_type` (the filter vocabulary), and a GIN
+index on `chunks.metadata`. **No index on `embedding`** — the sequential scan is
+the baseline.
+
+## Ingestion shapes (Session 7)
+
+`CatalogSource`, `DataCatalog`, `Document`, `DocumentMetadata` and the
+`pseudonym_mappings` / `ingestion_jobs` tables are documented in spec
+[011](../specs/011-session-7-data-ingestion.md); their payloads are unchanged by
+Session 8.

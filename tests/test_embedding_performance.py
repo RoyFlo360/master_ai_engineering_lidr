@@ -16,14 +16,14 @@ from types import SimpleNamespace
 
 from app.embedding_pipeline.chunker import JSONStructuralChunker
 from app.embedding_pipeline.embedder import BATCH_SIZE, OpenAIEmbedder
-from app.embedding_pipeline.schemas import Budget, Chunk, EmbeddedChunk, IngestRequest
+from app.embedding_pipeline.schemas import Budget, Chunk, EmbeddedChunk
 
 SAMPLE_PATH = Path(__file__).resolve().parent.parent / "data" / "budgets_sample.json"
 
 
 def sample_budgets() -> list[Budget]:
     payload = json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
-    return IngestRequest.model_validate({"budgets": payload}).budgets
+    return [Budget.model_validate(budget) for budget in payload]
 
 
 def make_chunks(count: int) -> list[Chunk]:
@@ -86,8 +86,8 @@ def test_chunking_the_sample_is_fast() -> None:
     chunks = chunker.chunk(budgets)
     elapsed = time.perf_counter() - started
 
-    assert len(chunks) == 52
-    assert elapsed < 2.0, f"chunking 52 components took {elapsed:.2f}s"
+    assert len(chunks) == 60
+    assert elapsed < 2.0, f"chunking 60 components took {elapsed:.2f}s"
 
 
 def test_assembling_a_large_response_tail_is_fast() -> None:

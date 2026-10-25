@@ -51,9 +51,15 @@ def estimated_cost_usd(total_tokens: int) -> float:
 class OpenAIEmbedder:
     """Thin wrapper over ``client.embeddings.create`` with batching and retries."""
 
-    def __init__(self, client: Any, model: str = MODEL) -> None:
+    def __init__(self, client: Any, model: str = MODEL, dimensions: int | None = None) -> None:
         self._client = client
         self._model = model
+        # Matryoshka / dimension trimming (spec 013). When set, OpenAI returns a
+        # shorter vector from the same model. **Not used by the ingest path**:
+        # the pgvector column is fixed at 1536, so a trimmed vector would be
+        # refused by the dimension guard. It exists for the chunking comparison
+        # scripts only.
+        self._dimensions = dimensions
 
     def embed_one(self, text: str) -> list[float]:
         """Embed a single text. Used by the ``compare.py`` CLI."""
@@ -96,9 +102,10 @@ class OpenAIEmbedder:
             if wait:
                 time.sleep(wait)
             try:
-                response = self._client.embeddings.create(
-                    model=self._model, input=texts
-                )
+                kwargs: dict[str, Any] = {"model": self._model, "input": texts}
+                if self._dimensions is not None:
+                    kwargs["dimensions"] = self._dimensions
+                response = self._client.embeddings.create(**kwargs)
                 return [item.embedding for item in response.data]
             except RateLimitError as exc:
                 last_error = exc

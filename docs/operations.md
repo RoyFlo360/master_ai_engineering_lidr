@@ -33,14 +33,14 @@ uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost
 ```
 
 The suite is hermetic: it reads no `.env`, reaches no provider, and needs no Redis or
-database. Measured today: **544 passed, 10 skipped** — the skips are the opt-in
-Postgres module.
+database. Measured today: **639 passed, 18 skipped** — the skips are the opt-in
+Postgres modules (10 ingestion, 8 vector store).
 
 To replay the persistence tests against a real database:
 
 ```shell
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
-uv run pytest -q                               # 554 passed, 0 skipped
+uv run pytest -q                               # 657 passed, 0 skipped
 ```
 
 ### Docker
@@ -182,123 +182,130 @@ container that never becomes healthy rather than a 500 on the first request.
 curl.exe -s http://localhost:8000/openapi.json | findstr "/embeddings/ingest"
 ```
 
-Or open <http://localhost:8000/docs>, confirm the **embeddings** tag, and use
-**Try it out** with the sample from `data/budgets_sample.json` (wrap it in
-`{"budgets": [...]}` first — the file is a bare array).
+Or open <http://localhost:8000/docs>, confirm the **embeddings** and **search**
+tags, and use **Try it out** with one budget from `data/budgets_sample.json`
+(the file is a bare array; take one element as `content`).
 
-### 2. Embeddings happy path (costs ~$0.00008)
+### 2. Ingest one document (writes to Postgres)
 
-PowerShell 5.1 note: do **not** round-trip the file through
-`ConvertFrom-Json | ConvertTo-Json`. It serialises the array as
-`{"value": [...], "Count": N}` and the request 422s. Build the wrapper as text.
+The endpoint now persists instead of returning vectors, and it takes **one
+document per request**. The vector store is Postgres-only, so start the database
+and apply the migration first (compose does it on boot):
+
+```shell
+docker compose up -d
+docker compose exec api alembic upgrade head
+```
 
 ```powershell
-$json = '{"budgets":' + (Get-Content data/budgets_sample.json -Raw) + '}'
-$r = Invoke-RestMethod -Method Post -Uri http://localhost:8000/embeddings/ingest `
-  -ContentType 'application/json' -Body $json
-$r.stats
-$r.chunks[0].chunk_id
-$r.chunks[0].embedding.Count
+# One budget from the sample, wrapped as the new contract expects.
+$budget = (Get-Content data/budgets_sample.json -Raw | ConvertFrom-Json)[0]
+$body = @{
+  source_path   = "data/budgets_sample.json::$($budget.budget_id)"
+  document_type = "historical_budget"
+  content       = $budget
+} | ConvertTo-Json -Depth 20
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/embeddings/ingest `
+  -ContentType 'application/json' -Body $body
 ```
 
-Expected: `total_budgets 15`, `total_chunks 52`, `total_tokens 4126`,
-`estimated_cost_usd 0.00008252`; first chunk `BUD-2024-001::AUTH-001`, 1536 dims,
-about 1.5 MB of response in ~1.2 s.
+Expected: `document_id 1`, `chunks_created 4`, `embedding_dimension 1536`,
+`ingestion_time_ms` in the hundreds. Re-sending the **same** `source_path`
+returns `409 {"detail": "Document already ingested", "document_id": 1}` — the
+response body is top-level, not nested under `detail`.
 
-#### Reading `estimated_cost_usd`
-
-The field is an **exact float, unrounded**. JSON has no decimal type, and
-Pydantic writes a float in the shortest form that round-trips, so any value below
-`1e-4` is serialised in exponent form. `9.2e-7` is not a truncated or abbreviated
-figure — it *is* `0.00000092`.
-
-| Tokens | JSON as returned | Same number, written out |
-| --- | --- | --- |
-| 46 | `9.2e-7` | `0.00000092` |
-| 52 | `1.04e-6` | `0.00000104` |
-| 4,126 | `8.252e-05` | `0.00008252` |
-| 1,000,000 | `0.02` | `0.02` |
-
-Read the sign: `e-7` means ×10⁻⁷. The 46-token call above cost **$0.00000092**,
-which is `9.2e-5` cents — less than one ten-thousandth of a cent. For scale, one
-million embedding tokens costs **$0.02**.
-
-Prices are `PRICE_PER_MILLION_TOKENS_USD = 0.02` in
-`app/embedding_pipeline/embedder.py`, separate from `llm_wrapper.MODEL_COSTS`
-(chat completions). Do not round the stored value: at 4 decimals a sub-cent call
-reads `0.0000` and vanishes from totals, and at 6 decimals it is overstated.
-Format for display in the client instead:
-
-```python
-f"${cost:.8f}"                    # $0.00000092
-f"{cost * 1_000_000:.2f} µUSD"    # 0.92 µUSD
-```
-
-The figure is computed from the chunker's `tiktoken` count of the input, so it is
-an *estimate* of the billed amount (hence the field name). For the OpenAI
-`text-embedding-3-*` family the counts agree to within a token or two.
+The whole corpus (17 budgets → 60 chunks) is one script, and it is idempotent:
 
 ```shell
-# bash / Git Bash
-curl -s -X POST http://localhost:8000/embeddings/ingest \
-  -H 'Content-Type: application/json' \
-  -d "{\"budgets\": $(cat data/budgets_sample.json)}" | head -c 300
+docker compose run --rm api python scripts/query_examples.py
+# or from the host:
+uv run python scripts/query_examples.py
 ```
 
-From inside the container (proves the image carries `scripts/` and `data/`):
+The real output is recorded in [`output_examples.txt`](../output_examples.txt).
+
+**No cost in the response.** Ingest reports identifiers and timing, not spend.
+The embedder still exposes `estimated_cost_usd(tokens)` for scripts; at $0.02 per
+1M input tokens the 60-chunk sample is about **$0.00012**.
 
 ```shell
-docker compose exec api python scripts/compare.py \
-  --text-a "OAuth 2.0 authentication backend with JWT tokens for fintech mobile app" \
-  --text-b "Authorization service using JSON Web Tokens for a banking application"
+docker compose exec -T postgres psql -U estimator -d estimator `
+  -c "select count(*) as documents from documents;" `
+  -c "select count(*) as chunks from chunks;"
 ```
 
-Expected `Cosine similarity: 0.5957`. The other two pairs and the commentary are
-in `app/embedding_pipeline/SANITY_CHECK.md`.
+### 3. Search the corpus
 
-### 3. Embeddings failure modes
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/search `
+  -ContentType 'application/json' `
+  -Body '{"query":"REST API with OAuth authentication","k":5}'
+```
+
+Expected: `results` ordered by ascending `distance` (cosine distance, lower is
+closer). An empty corpus is a `200` with `results: []`, not an error.
+
+### 4. Embeddings failure modes
 
 ```shell
-# 422 — empty budgets
+# 422 — missing content
 curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:8000/embeddings/ingest `
-  -H "Content-Type: application/json" -d '{"budgets":[]}'
-
-# 422 — unknown sector (only finance|ecommerce|healthcare|industrial)
-curl.exe -s -X POST http://localhost:8000/embeddings/ingest `
-  -H "Content-Type: application/json" `
-  -d '{"budgets":[{"budget_id":"B1","client_metadata":{"name":"A","sector":"fintech","country":"ES"},"project_summary":"s","main_technology":"go","year":2024,"total_estimated_hours":1,"components":[]}]}'
+  -H "Content-Type: application/json" -d '{"source_path":"x","document_type":"historical_budget"}'
 
 # 422 — unknown field
 curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:8000/embeddings/ingest `
-  -H "Content-Type: application/json" -d '{"budgets":[],"extra":1}'
+  -H "Content-Type: application/json" -d '{"source_path":"x","document_type":"d","content":{},"extra":1}'
+
+# 422 — k out of bounds on search
+curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:8000/search `
+  -H "Content-Type: application/json" -d '{"query":"x","k":99}'
 ```
 
 To see the **500 without an OpenAI key**, start a throwaway second API with the
 key cleared and call it on another port:
 
 ```shell
-docker compose run --rm -d --name nokey -e OPENAI_API_KEY= -p 8010:8000 `
+docker compose run --rm -d --name nokey -e OPENAI_API_KEY= -p 8011:8000 `
   api uvicorn app.main:app --host 0.0.0.0 --port 8000
-# wait ~10 s, then:
-curl.exe -s -X POST http://localhost:8010/embeddings/ingest `
-  -H "Content-Type: application/json" -d '{"budgets":[]}'
+# wait ~10 s, then send one valid budget (see above) to :8011
+# -> {"detail":"Embedding service is not available."}   status=500
 docker stop nokey
 ```
 
-An empty `budgets` list fails validation first, so it returns **422**
-(`"List should have at least 1 item"`). To reach the embedder and see the 500,
-send one valid budget. Write it to a file first — inline quoting through
-PowerShell into `curl.exe` truncates the JSON:
+The same generic 500 appears when `DATABASE_URL` is not Postgres (the host
+default is SQLite) or when `EMBEDDING_MODEL` is not the 1536-dim model. The log
+carries the reason (`database_not_postgres`,
+`embedding_model_dimension_mismatch`, `embedder_unavailable`); the response never
+does.
 
-```powershell
-$b = '{"budgets":[{"budget_id":"B1","client_metadata":{"name":"A","sector":"finance","country":"ES"},"project_summary":"summary","main_technology":"go","year":2024,"total_estimated_hours":1,"components":[{"component_id":"C1","name":"Auth","description":"Token auth.","tech_stack":["go"],"estimated_hours":1,"complexity":"low","dependencies":[]}]}]}'
-Set-Content "$env:TEMP\one_budget.json" $b -Encoding utf8 -NoNewline
-curl.exe -s -w "`nstatus=%{http_code}`n" -X POST http://localhost:8011/embeddings/ingest `
-  -H "Content-Type: application/json" --data-binary "@$env:TEMP\one_budget.json"
-# -> {"detail":"Embedding service is not available."}  status=500
+### 5. Chunking comparison
+
+Free strategies first — no provider calls:
+
+```shell
+uv run python scripts/compare_chunkers.py \
+  --strategies structural,fixed_size,recursive,sentence_window,hierarchical --show-stats
 ```
 
-### 4. Ingestion: accept, reject, poll
+The recorded report was generated with the paid ones included (~$0.0075, ~2 min):
+
+```shell
+uv run python scripts/compare_chunkers.py --strategies all --queries all \
+  --show-stats --show-cost --output app/embedding_pipeline/COMPARISON_REPORT.md
+```
+
+`--strategies all` includes `semantic`, `propositional` and
+`contextual_retrieval`. The last is the expensive one (~$0.14 on 17 budgets);
+it needs `ANTHROPIC_API_KEY`, and without it the CLI prints a warning and records
+the strategy as *not run* in the report rather than aborting.
+
+`--models small-1536,small-768` compares Matryoshka dimensions. It is wired but
+**not exercised** here: the stored vectors are pinned to `vector(1536)`.
+
+`--limit N` truncates the corpus, which is the cheap way to estimate a full run:
+`propositional` and `contextual_retrieval` scale linearly with components.
+
+### 6. Ingestion: accept, reject, poll
 
 ```shell
 curl -s -X POST http://localhost:8000/api/v1/ingestion/runs \
@@ -327,7 +334,7 @@ Expected: one `completed` job with 3 documents; mappings for `PERSON`,
 `EMAIL_ADDRESS`, `BUDGET_ID`, `CLIENT_CODE` and `LOCATION` — and **no**
 `DATE_TIME`, because dates are corpus data and are deliberately preserved.
 
-### 5. Tests
+### 7. Tests
 
 ```shell
 uv run pytest tests/test_embedding_schemas.py tests/test_embedding_chunker.py `
@@ -335,10 +342,10 @@ uv run pytest tests/test_embedding_schemas.py tests/test_embedding_chunker.py `
   tests/test_embedding_performance.py tests/test_embedding_security.py `
   tests/test_compare_cli.py -q            # 90 passed
 
-uv run pytest -q                          # 544 passed, 10 skipped
+uv run pytest -q                          # 639 passed, 18 skipped
 
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
-uv run pytest -q                          # 554 passed, 0 skipped
+uv run pytest -q                          # 657 passed, 0 skipped
 ```
 
 ## Where the artifacts are

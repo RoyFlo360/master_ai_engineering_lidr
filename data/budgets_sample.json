@@ -616,5 +616,97 @@
         "dependencies": ["METER-001"]
       }
     ]
+  },
+  {
+    "budget_id": "BUD-2024-016",
+    "client_metadata": { "name": "CoreBank Legacy Migration", "sector": "finance", "country": "ES" },
+    "project_summary": "Decomposition of a monolithic core banking platform into domain services",
+    "main_technology": "java_spring",
+    "year": 2024,
+    "total_estimated_hours": 720,
+    "components": [
+      {
+        "component_id": "MONO-001",
+        "name": "Core banking ledger extraction and strangler migration",
+        "description": "This component covers the full extraction of the general ledger, posting engine, and balance computation logic out of the existing thirty-year-old COBOL and PL/SQL monolith into a new event-sourced Java service, executed under a strangler-fig pattern so that the legacy system and the new service run side by side for the entire duration of the migration without any downtime for the retail and corporate banking channels. The work begins with a complete reverse-engineering exercise: the team must read and document the approximately four hundred stored procedures that currently implement double-entry bookkeeping, interest accrual, fee calculation, end-of-day batch settlement, and regulatory provisioning, because none of this logic is documented anywhere except in the code itself and in the heads of two engineers who are scheduled to retire within the year. Each stored procedure is catalogued, its inputs and outputs are characterised, its side effects on the forty-seven tables of the ledger schema are mapped, and a golden-master test harness is built that captures the exact byte-level output of the legacy system for a representative sample of one hundred thousand historical transactions spanning fifteen years, including leap-year edge cases, currency redenomination events, negative-interest-rate periods, and the migration from peseta to euro that still leaves residual rounding artefacts in some long-lived accounts. Once the golden master is in place, the new service is built incrementally: first the read path, exposing balances and statements through a versioned REST and gRPC API backed by a read model projected from an append-only event store, validated continuously against the legacy system through a shadow-traffic comparison layer that replays every production read against both systems and alerts on any divergence beyond a configurable tolerance of one cent. Then the write path is migrated account-product by account-product, starting with the simplest demand-deposit accounts and progressing through savings products, term deposits, revolving credit lines, mortgages with complex amortisation schedules, and finally the syndicated corporate facilities that involve multiple currencies, participation tranches, and bespoke fee structures negotiated per client. Every write is dual-written to both systems during a bake-in period, with the legacy system remaining the system of record until the new service has demonstrated bit-for-bit equivalence over a full quarterly close including the statutory regulatory reporting run that feeds the central bank. The component also includes the design and implementation of the event schema and its evolution strategy, since financial events are immutable and must be replayable decades into the future for audit and dispute resolution: this means a carefully versioned Avro schema registry, upcasting functions for every schema change, and a documented compatibility policy. Idempotency is mandatory throughout, because the upstream channels retry aggressively and a duplicated posting in a banking ledger is a regulatory incident, so every command carries a client-generated idempotency key that is deduplicated at the boundary and the deduplication window is sized to survive the longest plausible network partition. Observability is treated as a first-class deliverable: distributed tracing across the strangler boundary, business-level metrics for posting latency and end-of-day completion time, and a reconciliation dashboard that the finance operations team uses every morning to confirm that the two systems agreed overnight. The component further includes a comprehensive data migration plan for the historical balances, a cutover runbook with explicit rollback gates at each stage, a parallel-run sign-off protocol requiring the chief financial officer and the head of regulatory reporting to approve before the legacy write path is finally disabled, and a decommissioning plan for the COBOL programs that includes archival of the source code and the batch job control language for the seven-year retention period mandated by the regulator. Finally, the estimate accounts for the substantial coordination overhead of working against a live banking system: change windows are restricted to weekend nights, every deployment requires a separate approval from the operational risk committee, penetration testing must be repeated after each major milestone, and the team must maintain a frozen replica of the production environment for forensic replay in case any discrepancy is detected after cutover. Beyond the ledger itself, the component absorbs a long tail of cross-cutting concerns that a naive estimate would miss entirely. Currency handling must support the full ISO 4217 set with per-currency rounding rules, half-even versus half-up banker's rounding depending on the product, and a pluggable foreign-exchange rate source with intraday revaluation for multi-currency corporate accounts; every rounding decision is logged so that a treasury auditor can reconstruct exactly why a given cent landed where it did. Interest accrual is its own subsystem: daily accrual with multiple day-count conventions, tiered and stepped rates, promotional introductory rates that expire on calendar boundaries, retroactive rate corrections that must be reposted without rewriting history, and the negative-rate handling that European banks had to retrofit and that breaks many off-the-shelf engines. Fee logic is similarly intricate, spanning maintenance fees with balance-based waivers, transaction fees with monthly free-allowance buckets, overdraft fees with cooling-off windows mandated by consumer-protection regulation, and bespoke fee waivers negotiated for private-banking clients that must be encoded as data, not as code, so that a product manager can change them without a release. The posting engine must enforce the bank's chart of accounts and its hierarchy of control accounts, guaranteeing that every business transaction nets to zero across debit and credit legs even when a single customer action fans out into a dozen internal postings across suspense, clearing, interest-payable, and tax-withholding accounts. End-of-day processing is a hard real-time deadline: the entire book must be closed, revalued, and reconciled before the regulatory reporting window opens, which means the new service has to beat the legacy batch on wall-clock time while producing identical figures, and the team must build a performance test that replays a peak-volume day at two-times speed to prove headroom. Security and segregation of duties are pervasive: maker-checker workflows on any manual adjustment, immutable audit logging of every privileged action, field-level encryption of account identifiers at rest, and a key-rotation procedure that does not require re-encrypting the entire historical store. The component also includes onboarding and knowledge-transfer sessions with the two retiring engineers, recorded and transcribed, because their tacit knowledge is the single largest project risk; a glossary of the bank's idiosyncratic terminology; and a decision log capturing every place where the new system deliberately diverges from a legacy behaviour that was itself a bug, each such divergence signed off by the business owner so that nobody later mistakes an intentional fix for a regression.",
+        "tech_stack": ["java_spring", "kafka", "postgresql", "oracle", "cobol"],
+        "estimated_hours": 520,
+        "complexity": "high",
+        "dependencies": []
+      },
+      {
+        "component_id": "MONO-002",
+        "name": "Anti-corruption layer to legacy channels",
+        "description": "Adapter layer that translates between the new domain events and the legacy SOAP and fixed-width message formats still used by the branch terminals and ATM network, isolating the new services from decades of accreted message quirks.",
+        "tech_stack": ["java_spring", "kafka"],
+        "estimated_hours": 200,
+        "complexity": "high",
+        "dependencies": ["MONO-001"]
+      }
+    ]
+  },
+  {
+    "budget_id": "BUD-2024-017",
+    "client_metadata": { "name": "QuickShop MVP", "sector": "ecommerce", "country": "PT" },
+    "project_summary": "Bare-bones e-commerce MVP scoped in one-line tickets",
+    "main_technology": "node",
+    "year": 2024,
+    "total_estimated_hours": 160,
+    "components": [
+      {
+        "component_id": "MVP-001",
+        "name": "Login page",
+        "description": "Email and password login.",
+        "tech_stack": ["node"],
+        "estimated_hours": 16,
+        "complexity": "low",
+        "dependencies": []
+      },
+      {
+        "component_id": "MVP-002",
+        "name": "Product list",
+        "description": "List products.",
+        "tech_stack": ["node"],
+        "estimated_hours": 20,
+        "complexity": "low",
+        "dependencies": []
+      },
+      {
+        "component_id": "MVP-003",
+        "name": "Cart",
+        "description": "Add to cart.",
+        "tech_stack": ["node"],
+        "estimated_hours": 24,
+        "complexity": "low",
+        "dependencies": ["MVP-002"]
+      },
+      {
+        "component_id": "MVP-004",
+        "name": "Checkout",
+        "description": "Pay with card.",
+        "tech_stack": ["node"],
+        "estimated_hours": 40,
+        "complexity": "medium",
+        "dependencies": ["MVP-003"]
+      },
+      {
+        "component_id": "MVP-005",
+        "name": "Order email",
+        "description": "Send receipt.",
+        "tech_stack": ["node"],
+        "estimated_hours": 12,
+        "complexity": "low",
+        "dependencies": ["MVP-004"]
+      },
+      {
+        "component_id": "MVP-006",
+        "name": "Admin page",
+        "description": "Edit products.",
+        "tech_stack": ["node"],
+        "estimated_hours": 28,
+        "complexity": "low",
+        "dependencies": []
+      }
+    ]
   }
 ]

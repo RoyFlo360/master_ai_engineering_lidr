@@ -15,8 +15,10 @@ for finding *that* a decision exists.
 | 007 | [Conversational sessions, attachments and the structured response split](../specs/007-conversational-sessions.md) | Implemented | The `/sessions` endpoints, local pdf/docx extraction, the separate `StructuredEstimationResponse`, and semantic-cache degradation. |
 | 008 | [Session 6: hybrid memory, audience tiers, Actor-Critic-Boss, evals](../specs/008-session-6-memory-tiers-and-acb.md) | Implemented | Anchors plus rolling summary, the tier resolver and prompt v3, the Critic+Boss loop with its audit trail, per-turn telemetry, and the eval harnesses. |
 | 009 | [Session 6: per-turn observation, memory drift metrics, stress runner](../specs/009-session-6-stress-and-report.md) | Implemented | One structured per-turn telemetry event, drift metrics, the stress CLI and its report. |
-| 010 | [Session 7: embedding pipeline](../specs/010-session-7-embedding-pipeline.md) | Implemented | Structural chunking of budget JSON, batched OpenAI embeddings, a typed ingest response, and a standard-library cosine script. Persists nothing. |
+| 010 | [Session 7: embedding pipeline](../specs/010-session-7-embedding-pipeline.md) | Implemented | Structural chunking of budget JSON, batched OpenAI embeddings, a typed ingest response, and a standard-library cosine script. Persisted nothing — superseded by 012. |
 | 011 | [Session 7: data ingestion](../specs/011-session-7-data-ingestion.md) | Implemented | Catalog-driven ingestion with clean/validate, pseudonymization, job records and two HTTP endpoints. |
+| 012 | [Session 8: pgvector persistence and semantic search](../specs/012-session-8-pgvector-and-search.md) | Implemented | `documents`/`chunks` on their own declarative base, a dialect-guarded migration, one-transaction ingest with a unique `source_path`, and k-NN search by cosine distance. No vector index, by design. |
+| 013 | [Session 8 extras: chunking lab (and runtime model configuration, deferred)](../specs/013-session-8-runtime-config-and-chunking-lab.md) | Implemented (chunking lab) | Eight chunkers behind one `Chunker` ABC, compared by `POST /embeddings/compare` and `scripts/compare_chunkers.py`, with the results in `COMPARISON_REPORT.md`. Runtime model overrides (`GET/PUT /api/v1/config/models`) were deferred. |
 
 `specs/TEMPLATE.md` is the starting point for a new spec; `specs/README.md` explains
 the workflow and status vocabulary.
@@ -34,3 +36,7 @@ the workflow and status vocabulary.
   the spec precedes the implementation.
 - 010 and 011 were written before their code and are now Implemented; their
   Verification sections carry the real test and command output.
+- 012 is **Implemented** (pgvector persistence and semantic search) with real
+  evidence recorded. 013 is **partly Implemented**: the eight-strategy chunking
+  lab ships with its report; the runtime model-configuration half was deferred by
+  decision, and the spec records why.

@@ -8,6 +8,13 @@
   `README.md`, `AGENTS.md`, `docs/`, `rules/`
 - **Supersedes / Superseded by:** —
 
+> **Corpus note (2026-10-24).** The sample corpus grew from 15 budgets / 52
+> chunks to **17 budgets / 60 chunks (5,970 tokens)** when the reference project
+> appended `BUD-2024-016` and `BUD-2024-017` in its session-08 commit. Every
+> figure below is the **Session-7 reading**, left exactly as recorded. Current
+> counts live in `README.md` and `docs/operations.md`; the ingest contract
+> itself changed in spec 012.
+
 ## Problem
 
 Session 6 ended with historical budgets cleaned and normalized as JSON, but there
