@@ -232,3 +232,18 @@ build their temporary database. `alembic/env.py` points `target_metadata` at bot
 Both stacks are described in `data-flows.md` §6–8. Neither touches the
 estimation, streaming, session or ACB paths: retrieval is its own endpoint and
 `EstimationService` does not consult the corpus yet.
+
+### Known limitation: no composition between retrieval and estimation
+
+That split is deliberate, but it leaves a gap. `/search` is a retrieval
+primitive: it returns chunks and cosine distances, and its consumers
+(`scripts/query_examples.py`, `examples/trace_s09.py`, the chunking lab) need
+exactly that. What does not exist is the stage that calls retrieval **in order
+to estimate** — no orchestrator assembles the retrieved budgets and hands them
+to `EstimationService`. The result is two complete halves that never meet: an
+estimate with no evidence, and evidence nobody uses.
+
+[`arquitectura-actual.md`](../arquitectura-actual.md) is the Session-9 diagnosis
+of that gap: a real trace of a meeting transcript through `/search`, five
+concrete failures measured from it, and the modules that would close the loop.
+None of those modules are implemented, and `/search` is not scheduled to change.

@@ -79,6 +79,8 @@ Statuses: `Draft` · `Accepted` · `Implemented` · `Superseded by NNN`.
   search by cosine distance in SQL — with no vector index, on purpose
 - [013 — Session 8 extras: runtime model configuration and the chunking lab](013-session-8-runtime-config-and-chunking-lab.md)
   — Implemented (chunking lab) · eight chunkers behind one interface, the comparison endpoint and CLI, and a real `COMPARISON_REPORT.md`. The runtime model-configuration half is deferred.
+- [014 — Session 9: architectural diagnostic and the search query bound](014-session-9-prework-trace.md)
+  — Implemented · `arquitectura-actual.md`, the three probe transcripts and `examples/trace_s09.py`, plus one code change: `MAX_QUERY_CHARS` 2,000 → 20,000. No retrieval behaviour was added.
 
 ## How these were written
 

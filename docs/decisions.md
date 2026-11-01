@@ -19,6 +19,7 @@ for finding *that* a decision exists.
 | 011 | [Session 7: data ingestion](../specs/011-session-7-data-ingestion.md) | Implemented | Catalog-driven ingestion with clean/validate, pseudonymization, job records and two HTTP endpoints. |
 | 012 | [Session 8: pgvector persistence and semantic search](../specs/012-session-8-pgvector-and-search.md) | Implemented | `documents`/`chunks` on their own declarative base, a dialect-guarded migration, one-transaction ingest with a unique `source_path`, and k-NN search by cosine distance. No vector index, by design. |
 | 013 | [Session 8 extras: chunking lab (and runtime model configuration, deferred)](../specs/013-session-8-runtime-config-and-chunking-lab.md) | Implemented (chunking lab) | Eight chunkers behind one `Chunker` ABC, compared by `POST /embeddings/compare` and `scripts/compare_chunkers.py`, with the results in `COMPARISON_REPORT.md`. Runtime model overrides (`GET/PUT /api/v1/config/models`) were deferred. |
+| 014 | [Session 9: architectural diagnostic and the search query bound](../specs/014-session-9-prework-trace.md) | Implemented | `arquitectura-actual.md`, the three probe transcripts and a trace client. One code change: `MAX_QUERY_CHARS` 2,000 → 20,000 so a whole meeting transcript can be searched. No retrieval behaviour changed. |
 
 `specs/TEMPLATE.md` is the starting point for a new spec; `specs/README.md` explains
 the workflow and status vocabulary.
@@ -40,3 +41,6 @@ the workflow and status vocabulary.
   evidence recorded. 013 is **partly Implemented**: the eight-strategy chunking
   lab ships with its report; the runtime model-configuration half was deferred by
   decision, and the spec records why.
+- 014 is **Implemented**: the Session-9 diagnosis, its artifacts and the one
+  enabling change (the `/search` query bound). It deliberately implements none of
+  the evolution the deliverable proposes.

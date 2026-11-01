@@ -57,6 +57,10 @@ app/routers/ingestion.py       POST /api/v1/ingestion/runs + GET /api/v1/ingesti
 app/schemas/ingestion.py       ingestion HTTP request/response shapes
 scripts/compare.py             cosine similarity CLI for the embedding sanity check
 scripts/compare_chunkers.py    chunking-strategy comparison CLI (writes COMPARISON_REPORT.md)
+scripts/query_examples.py      idempotent corpus ingest + five query angles (retrieval evidence)
+examples/transcripts/          Session-9 probe transcripts (01_clear, 02_ambiguous, 03_hard) + TEMPLATE.md
+examples/trace_s09.py          Session-9 trace client: embed a transcript, POST /search, print the raw response
+arquitectura-actual.md         Session-9 diagnostic deliverable (4 sections + appendix)
 data/budgets_sample.json       17 normalized budgets -> 60 chunks (Track B)
 data/catalog/catalog.yaml      audited sources with include/review/exclude decisions (Track A)
 data/seed/                     budgets, transcripts and the excluded rate card (Track A)
@@ -74,7 +78,7 @@ streamlit_app_estimation_api.py  JSON client for /estimate
 streamlit_app_loader.py        two-tab client: typed /new-estimate + conversational /sessions — the one compose runs
 evals/                         golden-set harness: dataset.py, metrics.py, run.py (CLI), golden_dataset.json (16 cases)
 evals/stress/                  Session-6 stress harness: scenarios.py, metrics.py, run.py, analyze.py, fixtures/build_pdfs.py, REPORT.md
-tests/                         hermetic pytest suite (659 passing today + 18 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
+tests/                         hermetic pytest suite (664 passing today + 18 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
 specs/                         spec-driven decisions, numbered 001–013; README.md explains the convention. 012 is Implemented, 013 is Implemented for the chunking lab with runtime model config deferred
 MISSING-session{6,7,8}.md      gap analyses vs. the reference `ai-engineering/estimator` project, one per session
 Dockerfile                     python:3.14-slim; uv sync --frozen --no-install-project; one image serves both api and streamlit
@@ -114,7 +118,7 @@ other two clients are run by hand.
 - `GET /sessions/{session_id}` — session metadata + history length + `anchors_count`, `summary_chars`, `last_resolved_tier`, `last_tier_rule`, and the memory itself (`summary` text + `anchor_texts`)
 - `POST /embeddings/ingest` — one document per request: `{source_path, document_type, content: <Budget>, pseudonymize?: bool}` → `{document_id, chunks_created, embedding_dimension, ingestion_time_ms, entities_pseudonymized}`. `pseudonymize` (default `false`, strict boolean) rewrites each chunk's text through the PII pseudonymizer before embedding; `503` if it is set and no pseudonymizer is wired. Persists the document and its chunks in one transaction. Duplicate `source_path` → **409** with a top-level `{"detail": "Document already ingested", "document_id": N}`. 422 on validation, 500 generic when there is no OpenAI key, `DATABASE_URL` is not Postgres, or `EMBEDDING_MODEL` is not the 1536-dim model. **Prefix**: `/embeddings`, not `/api/v1`
 - `POST /embeddings/compare` — `{budgets, queries, strategies, top_k}` → `{stats_per_strategy, queries_per_strategy}`. Runs the eight chunkers over the same corpus and returns token stats plus top-k cosine per query. **Persists nothing.** 400 unknown strategy, 500 when a strategy's provider key is missing, 422 on the body. The three paid strategies (`semantic`, `propositional`, `contextual_retrieval`) bill during *ingestion*
-- `POST /search` — `{query, k}` (k 1–50, default 5) → `{query, k, search_time_ms, results[{chunk_id, document_id, chunk_type, content, distance, metadata}]}`. k-NN by cosine distance in SQL; sequential scan, no index. Empty corpus → 200 with `results: []`; 422 on bounds; 500 generic on failure. **Prefix**: unversioned, like `/embeddings`
+- `POST /search` — `{query, k}` (query 1–20,000 chars, k 1–50, default 5) → `{query, k, search_time_ms, results[{chunk_id, document_id, chunk_type, content, distance, metadata}]}`. k-NN by cosine distance in SQL; sequential scan, no index. Empty corpus → 200 with `results: []`; 422 on bounds; 500 generic on failure. **Prefix**: unversioned, like `/embeddings`
 - `POST /api/v1/ingestion/runs` — `{source_name}` → **202** `{job_id, source_name, status}`; unknown source → 404, `review`/`exclude` source → 400
 - `GET /api/v1/ingestion/jobs/{job_id}` — job status, document count, error, timestamps; 404 if unknown
 - `GET /health`, `GET /docs`, `GET /redoc`
@@ -489,3 +493,26 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     does not break consistency — but it does mean the mapping is not auditable.
     Wire `PostgresMappingStore` in `get_pseudonymizer` if you need Art. 17
     `forget` to work per value.
+
+70. **`SearchRequest.query` accepts 20,000 characters, not 2,000.** Raised in
+    Session 9 because a raw meeting transcript is a legitimate query and the
+    probe transcripts are 1,975–2,854 characters; the old bound returned 422
+    (`string_too_long`) before any embedding happened. 20,000 chars is ~6,200
+    tokens, still under `text-embedding-3-small`'s 8,191-token limit, and it is
+    still a bound: the endpoint is unauthenticated and every call is billed. The
+    three transcripts are pinned as valid requests in
+    `tests/test_embedding_schemas.py` and `tests/test_search_endpoint.py`.
+71. **`examples/trace_s09.py` is a manual client, never a pytest case.** It
+    needs a live Postgres (the vector store) and a real `OPENAI_API_KEY`, and it
+    embeds a whole transcript (a billed call). Run it with
+    `uv run --env-file .env python examples/trace_s09.py <transcript>`; inside the
+    stack use `docker compose exec api python examples/trace_s09.py <transcript>`.
+    `--dry-run` reports the resolved configuration with no network call. It adds
+    no behaviour to the service, and the Session-9 brief forbids it from growing
+    any (no reformulation, no reranking, no threshold).
+72. **The trace's findings live in `arquitectura-actual.md`, and the retrieval it
+    critiques is unchanged.** Do not "fix" the five flaws it names while doing
+    unrelated work: query understanding, budget-level aggregation, a relevance
+    threshold, parent-hour rollup, grounded generation and citation validation
+    are the next sessions' specs, not maintenance. In particular,
+    `documents.metadata` still does not persist `total_estimated_hours`.

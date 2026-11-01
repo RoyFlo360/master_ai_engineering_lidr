@@ -1,0 +1,116 @@
+==============================================================================
+PASO 1 — embedding de la transcripción completa
+==============================================================================
+transcript      : examples\transcripts\02_ambiguous.txt
+characters      : 2854
+tokens          : 890
+model           : text-embedding-3-small
+dimensionality  : 1536
+L2 norm         : 0.999691
+first component : 0.006233
+last component  : 0.019012
+
+==============================================================================
+PASO 2 — POST http://localhost:8000/search  (k=5, query = transcripción completa)
+==============================================================================
+payload         : query (2854 chars) + k=5
+status          : 200
+search_time_ms  : 904
+results         : 5
+
+  rank  chunk_id  distance  budget_id       component_id    sector       content
+     1       125    0.6083  BUD-2024-005    CATALOG-001     ecommerce    [Project: Headless e-commerce storefront with personalized recommendations] [Client sector: ecommerce | Year: 2024 | Mai
+     2       126    0.6138  BUD-2024-005    CART-002        ecommerce    [Project: Headless e-commerce storefront with personalized recommendations] [Client sector: ecommerce | Year: 2024 | Mai
+     3       127    0.6372  BUD-2024-005    RECO-003        ecommerce    [Project: Headless e-commerce storefront with personalized recommendations] [Client sector: ecommerce | Year: 2024 | Mai
+     4       128    0.6388  BUD-2024-005    STORE-004       ecommerce    [Project: Headless e-commerce storefront with personalized recommendations] [Client sector: ecommerce | Year: 2024 | Mai
+     5       136    0.6444  BUD-2024-008    RET-001         ecommerce    [Project: Fashion returns management and resale portal] [Client sector: ecommerce | Year: 2023 | Main tech: dotnet] Comp
+
+raw JSON written to var/trace_s09_response.json
+--- raw JSON ---
+{
+  "query": "Reunión exploratoria — sin título claro todavía\nCliente: Rubén Castaño (gerente, Casa Castaño — tienda de productos gourmet)\nConsultor: equipo de estimación\nFecha: primera toma de contacto\n\n[00:00:08] Consultor: Buenas, Rubén. Cuéntame, ¿qué os ronda por la cabeza?\n\n[00:00:15] Rubén: Pues mira, es que llevamos dándole vueltas un tiempo y no sé muy bien por dónde\nempezar, por eso os hemos llamado. Tenemos la tienda física de toda la vida, la de mi padre, llevamos\ncon ella desde el noventa y dos. Conservas, vinos, aceite, esas cosas. Y claro, vemos que el mundo va\npor otro lado y que hay que dar el salto, pero no tenemos ni idea de tecnología, ¿eh?, te lo digo ya.\n\n[00:01:02] Consultor: Sin problema, para eso estamos. ¿Qué te gustaría conseguir?\n\n[00:01:09] Rubén: A ver, lo ideal sería vender por internet, eso seguro. Que la gente entre, vea los\nproductos y compre, ¿no? Pero también... mira, mi sobrina, que de esto sabe más que yo, me dice que\nlo importante hoy es fidelizar. Que un cliente que repite vale más que diez que vienen una vez. Y yo\npienso, pues igual algo de puntos, o un club, no sé, que la gente acumule y luego canjee. Eso me\ngustaría. Aunque tampoco quiero liarlo mucho al principio, ¿eh?\n\n[00:02:05] Consultor: Vale. ¿Y cómo te imaginas el día a día gestionándolo?\n\n[00:02:12] Rubén: Pues eso es lo otro. Yo necesito ver qué se vende. Un panel, algo donde yo entre\npor la mañana con el café y vea los pedidos del día, lo que más se mueve, el stock... que ahora lo\nllevo en un cuaderno, te lo juro. Mi mujer me dice que parezco del siglo pasado. Algo visual, con sus\ngráficas, para tomar decisiones. Eso lo veo clarísimo, lo del panel de control.\n\n[00:03:01] Rubén: Ah, y oye, una cosa importante: que la gente pueda pagar con tarjeta, claro. Eso es\nfundamental, que el pago sea fácil y seguro, que no se me vayan en el último paso. He oído que mucha\ngente llena el carrito y luego no paga, y eso no puede ser.\n\n[00:03:40] Consultor: Totalmente. ¿Tenéis volumen previsto, mercados, algo de eso?\n\n[00:03:47] Rubén: Uf, pues no sabría decirte. España de momento, supongo. Aunque un primo en Francia\nme dice que allí los productos españoles se venden solos, así que quién sabe, igual más adelante.\nPero no me hagas mucho caso con eso. Y mira, también pensaba... no sé si es mucho pedir, pero estaría\nbien mandar un correo cuando alguien compra, para que sepa que va su pedido. Detalles, ¿sabes? Que el\ncliente se sienta atendido como en la tienda de siempre.\n\n[00:04:35] Rubén: En fin, que tampoco quiero marearos. Que sé que esto es un mundo. Lo que necesito\nes que me digáis vosotros, que sois los que sabéis, qué se puede hacer y más o menos cuánto cuesta.\nYo de presupuestos de software ni idea, ¿eh? Decidme un número y vemos.\n\n[00:05:02] Consultor: Tranquilo, Rubén, lo recogemos y te volvemos con una propuesta. Gracias.\n",
+  "k": 5,
+  "search_time_ms": 904,
+  "results": [
+    {
+      "chunk_id": 125,
+      "document_id": 36,
+      "chunk_type": "budget_component",
+      "content": "[Project: Headless e-commerce storefront with personalized recommendations]\n[Client sector: ecommerce | Year: 2024 | Main tech: node]\n\nComponent: Product catalog API\nDescription: GraphQL catalog API with faceted search, inventory availability and multi-currency pricing backed by Elasticsearch.\nTech stack: node, graphql, elasticsearch\nComplexity: medium\nEstimated hours: 150",
+      "distance": 0.6082954696301268,
+      "metadata": {
+        "year": 2024,
+        "budget_id": "BUD-2024-005",
+        "complexity": "medium",
+        "component_id": "CATALOG-001",
+        "client_sector": "ecommerce",
+        "estimated_hours": 150,
+        "main_technology": "node"
+      }
+    },
+    {
+      "chunk_id": 126,
+      "document_id": 36,
+      "chunk_type": "budget_component",
+      "content": "[Project: Headless e-commerce storefront with personalized recommendations]\n[Client sector: ecommerce | Year: 2024 | Main tech: node]\n\nComponent: Cart and checkout service\nDescription: Stateless cart service with promotion engine, tax calculation and a checkout orchestration that integrates the payment provider.\nTech stack: node, redis, postgresql\nComplexity: high\nEstimated hours: 140",
+      "distance": 0.6138128095161743,
+      "metadata": {
+        "year": 2024,
+        "budget_id": "BUD-2024-005",
+        "complexity": "high",
+        "component_id": "CART-002",
+        "client_sector": "ecommerce",
+        "estimated_hours": 140,
+        "main_technology": "node"
+      }
+    },
+    {
+      "chunk_id": 127,
+      "document_id": 36,
+      "chunk_type": "budget_component",
+      "content": "[Project: Headless e-commerce storefront with personalized recommendations]\n[Client sector: ecommerce | Year: 2024 | Main tech: node]\n\nComponent: Personalized recommendations\nDescription: Collaborative-filtering recommendations served from a feature store and exposed as a low-latency API for product and cart pages.\nTech stack: node, redis\nComplexity: medium\nEstimated hours: 110",
+      "distance": 0.6372392309978392,
+      "metadata": {
+        "year": 2024,
+        "budget_id": "BUD-2024-005",
+        "complexity": "medium",
+        "component_id": "RECO-003",
+        "client_sector": "ecommerce",
+        "estimated_hours": 110,
+        "main_technology": "node"
+      }
+    },
+    {
+      "chunk_id": 128,
+      "document_id": 36,
+      "chunk_type": "budget_component",
+      "content": "[Project: Headless e-commerce storefront with personalized recommendations]\n[Client sector: ecommerce | Year: 2024 | Main tech: node]\n\nComponent: Storefront PWA\nDescription: Progressive web app storefront consuming the headless APIs with server-side rendering for SEO.\nTech stack: next_js, react\nComplexity: low\nEstimated hours: 60",
+      "distance": 0.6387926562842304,
+      "metadata": {
+        "year": 2024,
+        "budget_id": "BUD-2024-005",
+        "complexity": "low",
+        "component_id": "STORE-004",
+        "client_sector": "ecommerce",
+        "estimated_hours": 60,
+        "main_technology": "node"
+      }
+    },
+    {
+      "chunk_id": 136,
+      "document_id": 39,
+      "chunk_type": "budget_component",
+      "content": "[Project: Fashion returns management and resale portal]\n[Client sector: ecommerce | Year: 2023 | Main tech: dotnet]\n\nComponent: Returns portal\nDescription: Self-service returns portal with label generation, reason capture and automatic restock or resale routing.\nTech stack: dotnet, sqlserver\nComplexity: medium\nEstimated hours: 140",
+      "distance": 0.6443924190186967,
+      "metadata": {
+        "year": 2023,
+        "budget_id": "BUD-2024-008",
+        "complexity": "medium",
+        "component_id": "RET-001",
+        "client_sector": "ecommerce",
+        "estimated_hours": 140,
+        "main_technology": "dotnet"
+      }
+    }
+  ]
+}

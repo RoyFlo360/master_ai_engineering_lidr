@@ -7,6 +7,8 @@ is a 200 with an empty result list.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,6 +17,8 @@ from app.dependencies import get_semantic_retriever
 from app.embedding_pipeline.schemas import SearchHit, SearchResponse
 
 URL = "/search"
+
+TRANSCRIPTS_DIR = Path(__file__).resolve().parent.parent / "examples" / "transcripts"
 
 
 def make_hits() -> list[SearchHit]:
@@ -120,6 +124,40 @@ def test_search_invalid_body_returns_422(wired, payload) -> None:
 
     assert client.post(URL, json=payload).status_code == 422
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("name", ["01_clear.txt", "02_ambiguous.txt", "03_hard.txt"])
+def test_search_accepts_a_whole_transcript(wired, name: str) -> None:
+    """A raw meeting transcript reaches the retriever intact (Session 9).
+
+    The old 2,000-character cap rejected two of the three probe transcripts at
+    validation time, before any embedding was attempted. This pins the raised
+    bound at the HTTP edge, where the trace actually hit it.
+    """
+    fake = FakeRetriever()
+    client = wired(fake)
+    transcript = (TRANSCRIPTS_DIR / name).read_text(encoding="utf-8")
+
+    response = client.post(URL, json={"query": transcript, "k": 5})
+
+    assert response.status_code == 200
+    assert fake.calls == [{"query": transcript, "k": 5}]
+
+
+def test_the_old_query_bound_would_have_rejected_two_of_three_transcripts() -> None:
+    """Why the bound moved: two of the three probe files exceed 2,000 characters.
+
+    ``01_clear.txt`` is short enough to have passed the old cap; that asymmetry is
+    exactly what made the failure look intermittent rather than systematic.
+    """
+    lengths = {
+        name: len((TRANSCRIPTS_DIR / name).read_text(encoding="utf-8"))
+        for name in ("01_clear.txt", "02_ambiguous.txt", "03_hard.txt")
+    }
+
+    assert lengths["01_clear.txt"] <= 2_000
+    assert lengths["02_ambiguous.txt"] > 2_000
+    assert lengths["03_hard.txt"] > 2_000
 
 
 def test_search_empty_corpus_returns_200_with_no_results(wired) -> None:

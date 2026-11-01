@@ -336,6 +336,19 @@ budgets answer 409 and are skipped) and runs the five query angles from the
 brief. Its real output against the sample corpus is in
 [`output_examples.txt`](output_examples.txt).
 
+### What retrieval cannot do yet (Session 9)
+
+[`arquitectura-actual.md`](arquitectura-actual.md) traces a raw meeting
+transcript through this pipeline and diagnoses where it stops: the system returns
+ranked components, never an estimate. Re-run the trace with
+`uv run --env-file .env python examples/trace_s09.py examples/transcripts/02_ambiguous.txt`
+(it needs the stack up and the corpus ingested). The document is a diagnosis, not
+a roadmap: none of the modules it proposes exist.
+
+The one code change that session made is the `/search` query bound — 2,000 →
+20,000 characters, so a whole transcript can be searched. See
+[spec 014](specs/014-session-9-prework-trace.md).
+
 ### Sanity check: `scripts/compare.py`
 
 Still useful for the embedding model itself: it embeds two texts and prints their

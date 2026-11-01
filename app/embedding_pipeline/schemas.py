@@ -42,7 +42,14 @@ MAX_HOURS_PER_COMPONENT = 100_000
 # two fields that are stored rather than validated away.
 MAX_SOURCE_PATH_CHARS = 512
 MAX_DOCUMENT_TYPE_CHARS = 50
-MAX_QUERY_CHARS = 2_000
+# Session 9 — raised from 2_000. A raw client-meeting transcript is a legitimate
+# query for ``/search`` (the Session-9 trace sends the whole file), and the three
+# sample transcripts are 1,975 / 2,854 / 2,397 characters, so the old bound
+# rejected two of them with a 422 before any embedding happened. 20_000 chars is
+# ~5k tokens: still far below ``text-embedding-3-small``'s 8,191-token input
+# limit, and still a cap — an unauthenticated request must not be able to send an
+# unbounded string into a billed embeddings call.
+MAX_QUERY_CHARS = 20_000
 MAX_SEARCH_K = 50
 
 

@@ -15,7 +15,7 @@ lockfile; `uv lock --check` reports whether it still matches the project file.
 | `python-multipart` | `>=0.0.9` | Parses `multipart/form-data` on the session endpoints | `Form(...)`/`File(...)` endpoints fail at startup |
 | `pydantic-settings` | `>=2.15.0` | `Settings`, `.env` loading, provider-key validation | `app/config.py` does not import; nothing starts |
 | `python-dotenv` | `>=1.2.3` | Reads the root `.env` file for `Settings` | `.env` values are ignored |
-| `litellm` | `>=1.83.0` | `Router` with primary/fallback deployments; provider-agnostic completion | `LLMWrapper.complete`, `complete_stream` and every Instructor call fail |
+| `litellm` | `>=1.83.0,<1.107` | `Router` with primary/fallback deployments; provider-agnostic completion | `LLMWrapper.complete`, `complete_stream` and every Instructor call fail |
 | `instructor` | unpinned | Structured output: validates the model against a Pydantic schema and re-prompts | Typed/conversational/ACB flows cannot produce `EstimationResult`, `CriticFeedback` or `ProjectMetadata` |
 | `openai` | `>=1.0.0,<3.13` | SDK used directly by the legacy flow, the moderation client and LiteLLM's OpenAI-compatible calls | `/api/v1/estimate` fails; moderation and the semantic cache vectorizer are unavailable |
 | `jinja2` | `>=3.1.6` | Renders the versioned prompt templates | `app/prompts/loader.py` fails; all prompt-rendered flows fail |

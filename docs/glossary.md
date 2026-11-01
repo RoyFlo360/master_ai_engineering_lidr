@@ -165,6 +165,18 @@ constant shared by the ORM column, the migration and the runtime guard.
 **Sequential scan** — the deliberate absence of a vector index. The scan is the
 baseline the live session measures an index against.
 
+**Retrieval primitive vs composition** — `/search` is a *primitive*: it returns
+the evidence (chunks, distances) and stops, because that is what its consumers
+need. *Composition* is the stage that calls a primitive for a purpose. This
+repository has the primitive and no composition, which is why an estimate is
+never grounded in the corpus; see `arquitectura-actual.md`. Adding estimation to
+`/search` would conflate the two and make retrieval impossible to inspect on its
+own.
+
+**Abstention** — returning "insufficient evidence" instead of the *k* least-bad
+chunks when nothing crosses a relevance threshold. Proposed, not implemented:
+`/search` accepts `k` and has no distance threshold.
+
 **Chunking strategy** — one implementation of the `Chunker` ABC in
 `app/embedding_pipeline/chunking/strategies/`. Eight exist: `structural` (the
 ingest default), `fixed_size`, `recursive`, `sentence_window`, `semantic`,

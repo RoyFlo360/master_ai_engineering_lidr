@@ -47,7 +47,7 @@ log the cause.
 | Critic issues | 12 per review | `CriticFeedback` |
 | `source_path` | 512 characters, no control characters, no surrounding whitespace | `IngestRequest` |
 | `document_type` | 50 characters | `IngestRequest` |
-| Search `query` | 2,000 characters | `SearchRequest` |
+| Search `query` | 20,000 characters (raised from 2,000 in Session 9) | `SearchRequest` |
 | Search `k` | 1â€“50 | `SearchRequest` |
 | Structured fields | per-field maxima in the schemas | Pydantic |
 

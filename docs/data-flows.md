@@ -378,3 +378,12 @@ endpoint and `EstimationService` does not consult the corpus yet. Vector indexes
 (HNSW/IVFFlat), metadata filters, hybrid search and Postgres tuning are the live
 session's work, not this repository's. See spec
 [012](../specs/012-session-8-pgvector-and-search.md).
+
+The gap is **composition, not retrieval**. `/search` returns chunks and distances
+on purpose — its consumers want the evidence, not a conclusion — so the missing
+piece is the stage that calls retrieval *in order to estimate*. Flow 7 above is
+therefore the last live step of that path, and no arrow leads from it to flow 3.
+The Session-9 diagnosis quantifies what that costs: same corpus, same embedding
+model, with a clear transcript `/search` returns distances around 0.41 and with
+an ambiguous one around 0.61 — see
+[`arquitectura-actual.md`](../arquitectura-actual.md).

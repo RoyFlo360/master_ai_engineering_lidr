@@ -33,14 +33,14 @@ uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost
 ```
 
 The suite is hermetic: it reads no `.env`, reaches no provider, and needs no Redis or
-database. Measured today: **659 passed, 18 skipped** — the skips are the opt-in
+database. Measured today: **664 passed, 18 skipped** — the skips are the opt-in
 Postgres modules (10 ingestion, 8 vector store).
 
 To replay the persistence tests against a real database:
 
 ```shell
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
-uv run pytest -q                               # 677 passed, 0 skipped
+uv run pytest -q                               # 682 passed, 0 skipped
 ```
 
 ### Docker
@@ -224,6 +224,26 @@ uv run python scripts/query_examples.py
 
 The real output is recorded in [`output_examples.txt`](../output_examples.txt).
 
+### Tracing a transcript through retrieval (Session 9)
+
+`examples/trace_s09.py` embeds a whole meeting transcript and sends it to
+`/search`, printing the vector statistics and the raw response. It is a client
+only: no reformulation, no threshold, no reranking.
+
+```shell
+uv run --env-file .env python examples/trace_s09.py examples/transcripts/02_ambiguous.txt --k 5
+
+# inside the stack, where DATABASE_URL and the key are already set
+docker compose exec api python examples/trace_s09.py examples/transcripts/02_ambiguous.txt
+
+# no network: transcript stats + resolved base URL
+uv run python examples/trace_s09.py --dry-run
+```
+
+A non-200 prints the response body and exits `2` — the body is the point of the
+trace. The Session-9 findings are in
+[`arquitectura-actual.md`](../arquitectura-actual.md).
+
 **No cost in the response.** Ingest reports identifiers and timing, not spend.
 The embedder still exposes `estimated_cost_usd(tokens)` for scripts; at $0.02 per
 1M input tokens the 60-chunk sample is about **$0.00012**.
@@ -361,10 +381,10 @@ uv run pytest tests/test_embedding_schemas.py tests/test_embedding_chunker.py `
   tests/test_embedding_performance.py tests/test_embedding_security.py `
   tests/test_compare_cli.py -q            # 90 passed
 
-uv run pytest -q                          # 659 passed, 18 skipped
+uv run pytest -q                          # 664 passed, 18 skipped
 
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
-uv run pytest -q                          # 677 passed, 0 skipped
+uv run pytest -q                          # 682 passed, 0 skipped
 ```
 
 ## Where the artifacts are

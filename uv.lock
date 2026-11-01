@@ -1466,7 +1466,7 @@ requires-dist = [
     { name = "langchain-experimental", specifier = ">=0.3.0" },
     { name = "langchain-openai", specifier = ">=0.2.0" },
     { name = "langchain-text-splitters", specifier = ">=0.3.0" },
-    { name = "litellm", specifier = ">=1.83.0" },
+    { name = "litellm", specifier = ">=1.83.0,<1.107" },
     { name = "nltk", specifier = ">=3.9" },
     { name = "openai", specifier = ">=1.0.0,<3.13" },
     { name = "openpyxl", specifier = ">=3.1" },

@@ -240,13 +240,19 @@ the flag did something.
 ### `SearchRequest` / `SearchHit` / `SearchResponse` — `POST /search`
 
 ```text
-SearchRequest{query (≤2,000), k (1..50, default 5)}
+SearchRequest{query (≤20,000), k (1..50, default 5)}
 SearchHit{chunk_id, document_id, chunk_type, content, distance, metadata}
 SearchResponse{query, k, search_time_ms, results[]}
 ```
 
 `distance` is cosine **distance** (lower = closer). `SearchHit.chunk_id` is the
 database primary key; the `BUD-…::COMP-…` id lives in `metadata`.
+
+The query bound is 20,000 characters (raised from 2,000 in Session 9): a raw
+client-meeting transcript is a legitimate query, and the probe transcripts used
+for the architectural trace are 1,975–2,854 characters. At ~5k tokens the bound
+stays well below the embedding model's 8,191-token input limit while still
+capping an unauthenticated, billed call.
 
 ## Chunking-comparison shapes
 

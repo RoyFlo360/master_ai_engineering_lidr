@@ -26,6 +26,11 @@ from app.embedding_pipeline.schemas import (
 )
 
 SAMPLE_PATH = Path(__file__).resolve().parent.parent / "data" / "budgets_sample.json"
+TRANSCRIPTS_DIR = Path(__file__).resolve().parent.parent / "examples" / "transcripts"
+
+# The three probe transcripts shipped for the Session-9 trace. Two of them were
+# rejected by the old 2_000-character cap, which is why it was raised.
+TRANSCRIPT_FILES = ("01_clear.txt", "02_ambiguous.txt", "03_hard.txt")
 
 
 def sample_budgets() -> list[dict]:
@@ -195,6 +200,21 @@ def test_search_request_defaults_and_bounds() -> None:
         SearchRequest.model_validate({"query": "x" * (MAX_QUERY_CHARS + 1)})
     with pytest.raises(ValidationError):
         SearchRequest.model_validate({"query": ""})
+
+
+def test_real_transcripts_fit_the_search_query_bound() -> None:
+    """The Session-9 probe transcripts must be accepted as a ``/search`` query.
+
+    The bound was raised from 2,000 to 20,000 characters for exactly this: the
+    trace sends a whole meeting transcript, and two of the three files are
+    longer than the old cap.
+    """
+    for name in TRANSCRIPT_FILES:
+        text = (TRANSCRIPTS_DIR / name).read_text(encoding="utf-8")
+        assert len(text) <= MAX_QUERY_CHARS, f"{name} is {len(text)} chars"
+        request = SearchRequest.model_validate({"query": text, "k": 5})
+        assert request.query == text
+        assert request.k == 5
 
 
 def test_description_length_cap_is_enforced() -> None:
