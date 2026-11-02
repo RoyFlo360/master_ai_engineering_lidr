@@ -64,7 +64,7 @@ arquitectura-actual.md         Session-9 diagnostic deliverable (4 sections + ap
 data/budgets_sample.json       17 normalized budgets -> 60 chunks (Track B)
 data/catalog/catalog.yaml      audited sources with include/review/exclude decisions (Track A)
 data/seed/                     budgets, transcripts and the excluded rate card (Track A)
-alembic/                       two migrations: pseudonym_mappings + ingestion_jobs; documents + chunks (Postgres-only)
+alembic/                       three migrations: pseudonym_mappings + ingestion_jobs; documents + chunks (Postgres-only); the HNSW index on chunks.embedding
 docs/                          architecture, stack, flows, data model, operations, glossary, decisions
 rules/                         development, API, testing, QA, security and documentation rules
 app/prompts/estimation/v1/     system.j2, user.j2, examples.j2  (the typed v1 flow)
@@ -118,7 +118,7 @@ other two clients are run by hand.
 - `GET /sessions/{session_id}` — session metadata + history length + `anchors_count`, `summary_chars`, `last_resolved_tier`, `last_tier_rule`, and the memory itself (`summary` text + `anchor_texts`)
 - `POST /embeddings/ingest` — one document per request: `{source_path, document_type, content: <Budget>, pseudonymize?: bool}` → `{document_id, chunks_created, embedding_dimension, ingestion_time_ms, entities_pseudonymized}`. `pseudonymize` (default `false`, strict boolean) rewrites each chunk's text through the PII pseudonymizer before embedding; `503` if it is set and no pseudonymizer is wired. Persists the document and its chunks in one transaction. Duplicate `source_path` → **409** with a top-level `{"detail": "Document already ingested", "document_id": N}`. 422 on validation, 500 generic when there is no OpenAI key, `DATABASE_URL` is not Postgres, or `EMBEDDING_MODEL` is not the 1536-dim model. **Prefix**: `/embeddings`, not `/api/v1`
 - `POST /embeddings/compare` — `{budgets, queries, strategies, top_k}` → `{stats_per_strategy, queries_per_strategy}`. Runs the eight chunkers over the same corpus and returns token stats plus top-k cosine per query. **Persists nothing.** 400 unknown strategy, 500 when a strategy's provider key is missing, 422 on the body. The three paid strategies (`semantic`, `propositional`, `contextual_retrieval`) bill during *ingestion*
-- `POST /search` — `{query, k}` (query 1–20,000 chars, k 1–50, default 5) → `{query, k, search_time_ms, results[{chunk_id, document_id, chunk_type, content, distance, metadata}]}`. k-NN by cosine distance in SQL; sequential scan, no index. Empty corpus → 200 with `results: []`; 422 on bounds; 500 generic on failure. **Prefix**: unversioned, like `/embeddings`
+- `POST /search` — `{query, k}` (query 1–20,000 chars, k 1–50, default 5) → `{query, k, search_time_ms, results[{chunk_id, document_id, chunk_type, content, distance, metadata}]}`. k-NN by cosine distance in SQL through the HNSW index (`ix_chunks_embedding_hnsw`, `vector_cosine_ops`); `hnsw.ef_search` is set to 40 per transaction. Empty corpus → 200 with `results: []`; 422 on bounds; 500 generic on failure. **Prefix**: unversioned, like `/embeddings`
 - `POST /api/v1/ingestion/runs` — `{source_name}` → **202** `{job_id, source_name, status}`; unknown source → 404, `review`/`exclude` source → 400
 - `GET /api/v1/ingestion/jobs/{job_id}` — job status, document count, error, timestamps; 404 if unknown
 - `GET /health`, `GET /docs`, `GET /redoc`
@@ -434,8 +434,15 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     of truth, and `/embeddings/ingest` + `/search` are disabled (generic 500) when
     `EMBEDDING_MODEL` is not `text-embedding-3-small`. A mismatched provider
     response is refused before the write.
-53. **No vector index exists, deliberately.** The sequential scan is the baseline
-    the live session measures HNSW against; adding one changes that baseline.
+53. **The vector index is HNSW, and the operator class is load-bearing.**
+    `ix_chunks_embedding_hnsw` uses `vector_cosine_ops` (m = 16,
+    ef_construction = 128) to match the `<=>` in `ChunkStore.search`. Any other
+    operator class makes the planner ignore the index **silently**. `ef_search`
+    is query-time: `ChunkStore.search` issues `SET LOCAL hnsw.ef_search = 40`
+    inside the session's transaction, so it never leaks to the next request on a
+    pooled connection. At the 60-chunk sample size the planner still prefers a
+    sequential scan — that is cost-based, not a broken index; force it with
+    `SET enable_seqscan = off` to see the index scan.
 54. **Two database stacks, one URL.** The async engine derives `+asyncpg` from
     `DATABASE_URL`; handing the `+psycopg` URL to `create_async_engine` fails.
     Both engines are lazy and cached per URL — importing

@@ -3,11 +3,15 @@
 ``models`` defines the ``documents`` / ``chunks`` tables on their own declarative
 base; ``repository`` is the async data-access layer. Sessions are owned by the
 callers (ingest service / retriever) so a whole ingest fits in one transaction.
-No vector index yet — the live session adds HNSW on top of this baseline.
+``chunks.embedding`` carries an HNSW index (Session 9) and ``ChunkStore.search``
+sets ``ef_search`` per transaction.
 """
 
 from app.embedding_pipeline.store.models import (
     EMBEDDING_DIMENSIONS,
+    HNSW_EF_CONSTRUCTION,
+    HNSW_EF_SEARCH,
+    HNSW_M,
     ChunkRow,
     DocumentRow,
     RagBase,
@@ -20,5 +24,8 @@ __all__ = [
     "ChunkStore",
     "DocumentRow",
     "EMBEDDING_DIMENSIONS",
+    "HNSW_EF_CONSTRUCTION",
+    "HNSW_EF_SEARCH",
+    "HNSW_M",
     "RagBase",
 ]

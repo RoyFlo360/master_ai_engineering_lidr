@@ -201,7 +201,8 @@ Three subsystems were added after Session 6 and are part of the running service:
   `POST /search`. Chunks budget components structurally, embeds them with
   `text-embedding-3-small`, and persists each budget as a `documents` row plus
   its embedded `chunks` in **one transaction**. Retrieval is k-NN by cosine
-  distance in SQL, with a sequential scan and no vector index.
+  distance in SQL through an HNSW index (spec
+  [015](../specs/015-session-9-hnsw-index.md)).
 - **Data ingestion** (spec [011](../specs/011-session-7-data-ingestion.md)) —
   `app/ingestion/` + `app/persistence/`, exposed as
   `POST /api/v1/ingestion/runs` and `GET /api/v1/ingestion/jobs/{job_id}`.

@@ -8,11 +8,15 @@ and leaves no orphan ``documents`` row.
 
 from __future__ import annotations
 
-from sqlalchemy import Row, select
+from sqlalchemy import Row, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.embedding_pipeline.schemas import EmbeddedChunk
-from app.embedding_pipeline.store.models import ChunkRow, DocumentRow
+from app.embedding_pipeline.store.models import (
+    HNSW_EF_SEARCH,
+    ChunkRow,
+    DocumentRow,
+)
 
 # The structural chunker emits one chunk per budget component; the vocabulary is
 # queryable thanks to the index on ``chunk_type`` (live-session filters).
@@ -71,17 +75,25 @@ class ChunkStore:
     async def search(
         self, session: AsyncSession, *, query_vector: list[float], k: int
     ) -> list[Row]:
-        """k nearest chunks by cosine distance (``<=>``), sequential scan.
+        """k nearest chunks by cosine distance (``<=>``) through the HNSW index.
 
         Cosine over L2/inner product: OpenAI embeddings are normalized so the
         ranking would be equivalent, but cosine keeps us aligned with the RAG
-        literature AND with the ``vector_cosine_ops`` operator class of the HNSW
-        index the live session adds — an operator/index mismatch makes Postgres
-        silently ignore the index.
+        literature AND with the ``vector_cosine_ops`` operator class of
+        ``ix_chunks_embedding_hnsw`` — an operator/index mismatch makes Postgres
+        silently ignore the index and fall back to a sequential scan.
 
-        No vector index exists yet, so this is a sequential scan on purpose: it
-        is the baseline the live session measures the index against.
+        ``SET LOCAL hnsw.ef_search`` is applied inside the session's implicit
+        transaction: ``SET LOCAL`` scopes the setting to that transaction, so a
+        tuned value never leaks to other statements on the same pooled
+        connection. It has no effect on SQLite, which is why the statement is
+        guarded by dialect.
         """
+        if session.get_bind().dialect.name == "postgresql":
+            # The value is a module constant (int), never user input; SET does
+            # not accept bind parameters.
+            await session.execute(text(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}"))
+
         distance = ChunkRow.embedding.cosine_distance(query_vector)
         stmt = (
             select(

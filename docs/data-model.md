@@ -283,9 +283,11 @@ chunks{id, document_id → documents.id ON DELETE CASCADE, chunk_type, content,
        embedding vector(1536) NULL, metadata JSONB, created_at}
 ```
 
-Indexes: unique `source_path`, `chunk_type` (the filter vocabulary), and a GIN
-index on `chunks.metadata`. **No index on `embedding`** — the sequential scan is
-the baseline.
+Indexes: unique `source_path`, `chunk_type` (the filter vocabulary), a GIN
+index on `chunks.metadata`, and HNSW on `chunks.embedding`
+(`vector_cosine_ops`, `m = 16`, `ef_construction = 128`). `ef_search` is
+query-time (40, set with `SET LOCAL` in `ChunkStore.search`), not part of the
+index.
 
 ## Ingestion shapes (Session 7)
 

@@ -287,8 +287,10 @@ set and the deployment has no pseudonymizer. Details go to the log only.
 request
   -> Pydantic validation       422 when k is out of bounds or the query is empty
   -> OpenAIEmbedder.embed_one  in a thread; same model used at ingest time
-  -> ChunkStore.search         SELECT ... embedding <=> :query AS distance
-                               ORDER BY distance LIMIT k   (sequential scan)
+  -> ChunkStore.search         SET LOCAL hnsw.ef_search = 40
+                               SELECT ... embedding <=> :query AS distance
+                               ORDER BY distance LIMIT k   (HNSW scan when
+                               the planner prefers it; seq scan otherwise)
   -> 200 {query, k, search_time_ms, results[]}
 ```
 
@@ -296,12 +298,18 @@ request
 
 **Why cosine.** OpenAI embeddings are normalized, so L2 and inner product would
 rank identically. Cosine is chosen to match the `vector_cosine_ops` operator
-class of the HNSW index a later phase adds — an operator/index mismatch makes
-Postgres ignore the index silently.
+class of `ix_chunks_embedding_hnsw` — an operator/index mismatch makes Postgres
+ignore the index silently.
 
-**Deliberately absent.** No vector index (the sequential scan is the baseline the
-live session measures), no metadata filters, no hybrid search, no reranking, and
-no integration into `EstimationService.estimate()`.
+**Index and tuning.** The HNSW index is built with `m = 16` and
+`ef_construction = 128` (migration `0003`); `ef_search = 40` is applied per
+transaction so pooled connections do not inherit it. At the sample corpus size
+the planner still chooses a sequential scan; the index is used once the table is
+large enough to justify the graph walk.
+
+**Deliberately absent.** No metadata filters, no hybrid search, no reranking, and
+no integration into `EstimationService.estimate()`. The index is the only
+retrieval change in this phase.
 
 ## 8. Chunking comparison — `POST /embeddings/compare`
 
@@ -374,10 +382,10 @@ message — the client already has its 202 and cannot see it there.
 ## Planned flows
 
 Retrieval inside the estimation prompt is not implemented: `/search` is its own
-endpoint and `EstimationService` does not consult the corpus yet. Vector indexes
-(HNSW/IVFFlat), metadata filters, hybrid search and Postgres tuning are the live
-session's work, not this repository's. See spec
-[012](../specs/012-session-8-pgvector-and-search.md).
+endpoint and `EstimationService` does not consult the corpus yet. Metadata
+filters, hybrid search and Postgres tuning are the live session's work, not this
+repository's. See specs [012](../specs/012-session-8-pgvector-and-search.md) and
+[015](../specs/015-session-9-hnsw-index.md).
 
 The gap is **composition, not retrieval**. `/search` returns chunks and distances
 on purpose — its consumers want the evidence, not a conclusion — so the missing

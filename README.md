@@ -307,11 +307,13 @@ log, never the response.
   index, queryable without a migration per new key.
 - **Cosine, not L2 or inner product.** OpenAI embeddings are normalized so the
   ranking is equivalent; cosine matches the RAG literature and, concretely, the
-  `vector_cosine_ops` operator class of the HNSW index a later phase adds. An
+  `vector_cosine_ops` operator class of `ix_chunks_embedding_hnsw`. An
   operator/index mismatch makes Postgres ignore the index **silently**.
-- **No vector index — deliberate.** The sequential scan is the baseline the live
-  session measures HNSW against. At 17 budgets / 60 chunks it answers in a few
-  hundred milliseconds.
+- **HNSW index (Session 9).** `chunks.embedding` is indexed with HNSW
+  (`m = 16`, `ef_construction = 128`), and `ChunkStore.search` sets
+  `hnsw.ef_search = 40` per transaction. At 17 budgets / 60 chunks the planner
+  still picks the sequential scan — 60 rows are cheaper to scan than to walk a
+  graph — so force `SET enable_seqscan = off` to see the index path.
 
 `vector(1536)` is hard-coded because changing it means re-embedding the corpus.
 `embedding` is nullable so an "insert now, embed later" path stays open.

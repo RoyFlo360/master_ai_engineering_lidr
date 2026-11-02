@@ -3,7 +3,9 @@
 Skipped unless ``TEST_DATABASE_URL`` points at a reachable Postgres. These prove
 the things a fake cannot:
 
-* the migration really creates ``vector(1536)``, JSONB and the GIN index;
+* the migration really creates ``vector(1536)``, JSONB, the GIN index and the
+  Session-9 HNSW index with the configured build knobs;
+* ``SET LOCAL hnsw.ef_search`` really applies 40 inside the search transaction;
 * the one-transaction ingest really commits both tables;
 * a duplicate ``source_path`` is refused by the **unique index**, not just by
   the application check;
@@ -161,8 +163,8 @@ def test_migration_created_the_vector_schema() -> None:
         engine.dispose()
 
 
-def test_no_vector_index_exists() -> None:
-    """The sequential scan is the baseline the live session measures against."""
+def test_hnsw_vector_index_exists() -> None:
+    """Session 9 replaced the sequential-scan baseline with HNSW."""
     from sqlalchemy import create_engine
 
     engine = create_engine(DATABASE_URL)
@@ -174,11 +176,29 @@ def test_no_vector_index_exists() -> None:
     finally:
         engine.dispose()
 
-    assert indexes, "expected the relational indexes to exist"
-    for name, definition in indexes:
-        assert "embedding" not in definition, f"{name} indexes the vector column"
-        assert "hnsw" not in definition.lower()
-        assert "ivfflat" not in definition.lower()
+    by_name = dict(indexes)
+    definition = by_name["ix_chunks_embedding_hnsw"].lower()
+    assert "using hnsw" in definition
+    assert "embedding vector_cosine_ops" in definition
+    assert "m = 16" in definition or "m='16'" in definition or "m=16" in definition
+    assert "ef_construction" in definition
+    assert "128" in definition
+
+
+def test_search_applies_ef_search_locally(session_factory) -> None:
+    """``SET LOCAL`` must be visible to the query in the retriever's flow.
+
+    No explicit ``session.begin()``: the retriever opens a plain session and
+    relies on SQLAlchemy's implicit transaction, which is the path that ships.
+    """
+    store = ChunkStore()
+
+    async def _check() -> str:
+        async with session_factory() as session:
+            await store.search(session, query_vector=one_hot(0), k=5)
+            return await session.scalar(text("select current_setting('hnsw.ef_search')"))
+
+    assert asyncio.run(_check()) == "40"
 
 
 def test_ingest_persists_document_and_chunks(ingest_service, session_factory) -> None:

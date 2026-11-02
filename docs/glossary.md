@@ -157,13 +157,20 @@ embedding, `chunk_type` (`budget_component`) and filterable JSONB metadata.
 
 **Cosine distance** — `1 - cosine similarity`, computed in SQL with the `<=>`
 operator. Lower is closer. Chosen over L2/inner product to match the
-`vector_cosine_ops` class of the HNSW index a later phase adds.
+`vector_cosine_ops` class of `ix_chunks_embedding_hnsw`.
 
 **`EMBEDDING_DIMENSIONS`** — 1536, the width of `text-embedding-3-small`. One
 constant shared by the ORM column, the migration and the runtime guard.
 
-**Sequential scan** — the deliberate absence of a vector index. The scan is the
-baseline the live session measures an index against.
+**HNSW** — hierarchical navigable small world, the approximate-nearest-neighbour
+index on `chunks.embedding` (spec 015). `m = 16` neighbours per layer and
+`ef_construction = 128` are build-time; `ef_search = 40` is query-time and set
+with `SET LOCAL` per transaction. `vector_cosine_ops` must match the `<=>`
+operator or the planner ignores the index.
+
+**Sequential scan** — the fallback when the planner judges a table scan cheaper
+than the HNSW graph walk. At 60 chunks that is the correct choice; it is no
+longer the only option.
 
 **Retrieval primitive vs composition** — `/search` is a *primitive*: it returns
 the evidence (chunks, distances) and stops, because that is what its consumers

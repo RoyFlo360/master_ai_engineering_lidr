@@ -2,8 +2,9 @@
 
 Embeds the query with the SAME model used at ingest time (mixing embedding
 models makes distances meaningless) and ranks chunks by cosine distance via
-SQL. No vector index and no metadata filtering yet — both are built live in the
-session on top of this baseline.
+SQL. The cosine distance is served by the HNSW index on ``chunks.embedding``
+(``ef_search`` pinned per query in ``ChunkStore.search``). No metadata filtering
+yet.
 """
 
 from __future__ import annotations

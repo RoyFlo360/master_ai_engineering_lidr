@@ -115,8 +115,6 @@ formats for the UI; the pricing modules stay numeric.
   `math` in `app/embedding_pipeline/analysis/similarity.py` and `scripts/compare.py`,
   and cosine *distance* is evaluated by Postgres (`<=>`); the only other numeric use
   is the semantic cache's float32 conversion.
-- A vector index (HNSW/IVFFlat). The sequential scan is the deliberate baseline for
-  the live session to measure an index against (spec 012).
 - A task queue (Celery, RQ, arq). The ingestion run is a FastAPI `BackgroundTask` in
   the same process; the vector store needs no background worker.
 - A web framework beyond FastAPI. The service is one process serving one app.

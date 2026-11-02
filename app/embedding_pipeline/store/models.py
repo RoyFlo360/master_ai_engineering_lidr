@@ -20,8 +20,12 @@ Design notes (justified in the README and in spec 012):
   changing it means re-embedding the whole corpus, so it is not configuration.
   ``EMBEDDING_DIMENSIONS`` is exported so the embedder, the migration and the
   startup guard all read the same number.
-* **No vector index on purpose** — the live session adds HNSW and measures the
-  before/after against this sequential-scan baseline.
+* **HNSW on ``chunks.embedding``** (Session 9). ``m = 16``,
+  ``ef_construction = 128`` at build time; ``ef_search = 40`` is set per query
+  in ``ChunkStore.search``. The operator class is ``vector_cosine_ops`` and must
+  match the ``<=>`` operator the query uses, or Postgres silently ignores the
+  index. The parameters are module constants here so the ORM, the migration and
+  the query path cannot drift apart.
 
 **A separate declarative base, not the shared one.** These tables use
 ``Vector``, ``JSONB`` and a Postgres-only extension. ``app.persistence.models``
@@ -46,6 +50,17 @@ from sqlalchemy.types import DateTime
 #: Dimensionality of ``text-embedding-3-small``. One number, three consumers:
 #: the ORM column, the migration and the startup guard.
 EMBEDDING_DIMENSIONS = 1536
+
+#: HNSW build knobs. ``m`` = neighbours per layer, ``ef_construction`` = candidate
+#: list while building. They are fixed at index-build time: changing either needs
+#: a REINDEX, so they live here next to the index definition.
+HNSW_M = 16
+HNSW_EF_CONSTRUCTION = 128
+
+#: Query-time candidate list. Unlike the two above this can change per query;
+#: ``ChunkStore.search`` applies it with ``SET LOCAL`` so it never leaks to other
+#: statements on the same pooled connection.
+HNSW_EF_SEARCH = 40
 
 
 class RagBase(DeclarativeBase):
@@ -86,6 +101,16 @@ class ChunkRow(RagBase):
         Index("ix_chunks_document_id", "document_id"),
         Index("ix_chunks_chunk_type", "chunk_type"),
         Index("ix_chunks_metadata_gin", "metadata", postgresql_using="gin"),
+        # Approximate nearest neighbours. ``vector_cosine_ops`` is not optional:
+        # it matches the ``<=>`` operator in ChunkStore.search. ``postgresql_with``
+        # renders the build-time knobs into WITH (...).
+        Index(
+            "ix_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"m": HNSW_M, "ef_construction": HNSW_EF_CONSTRUCTION},
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

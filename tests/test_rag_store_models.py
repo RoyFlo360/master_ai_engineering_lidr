@@ -3,8 +3,8 @@
 Pure metadata introspection — no engine, no database. These pin the design
 decisions the exercise asks students to defend: the reserved-name mapping
 (``metadata_`` -> column ``"metadata"``), the 1536-dim nullable vector, the
-CASCADE FK, the deliberate absence of a vector index, and — our addition — the
-fact that the vector tables do not pollute the portable ``Base``.
+CASCADE FK, the HNSW index added in Session 9, and — our addition — the fact
+that the vector tables do not pollute the portable ``Base``.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from pgvector.sqlalchemy import Vector
 
 from app.embedding_pipeline.store.models import (
     EMBEDDING_DIMENSIONS,
+    HNSW_EF_SEARCH,
     ChunkRow,
     DocumentRow,
     RagBase,
@@ -40,10 +41,26 @@ def test_chunks_fk_cascades_on_document_delete():
     assert fk.ondelete == "CASCADE"
 
 
-def test_no_vector_index_yet():
-    # The live session adds HNSW; the previo ships sequential scan only.
-    index_columns = {col.name for index in ChunkRow.__table__.indexes for col in index.columns}
-    assert "embedding" not in index_columns
+def test_hnsw_index_on_embedding():
+    """Session 9: the sequential-scan baseline has an HNSW successor.
+
+    The operator class is the load-bearing part — with anything other than
+    ``vector_cosine_ops`` the planner would ignore the index for ``<=>``.
+    """
+    index = next(
+        index
+        for index in ChunkRow.__table__.indexes
+        if index.name == "ix_chunks_embedding_hnsw"
+    )
+    assert {col.name for col in index.columns} == {"embedding"}
+    postgresql = index.dialect_options["postgresql"]
+    assert postgresql["using"] == "hnsw"
+    assert postgresql["ops"] == {"embedding": "vector_cosine_ops"}
+    assert postgresql["with"] == {"m": 16, "ef_construction": 128}
+
+
+def test_query_time_ef_search_is_pinned():
+    assert HNSW_EF_SEARCH == 40
 
 
 def test_relational_indexes_present():
@@ -52,6 +69,7 @@ def test_relational_indexes_present():
         "ix_chunks_document_id",
         "ix_chunks_chunk_type",
         "ix_chunks_metadata_gin",
+        "ix_chunks_embedding_hnsw",
     }
     assert {index.name for index in DocumentRow.__table__.indexes} == {
         "ix_documents_source_path"
