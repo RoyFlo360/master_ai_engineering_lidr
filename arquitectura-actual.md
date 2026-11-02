@@ -14,6 +14,17 @@ hasta cerrar el bucle transcripción → estimación.
 > `ea33140`. Corpus: 17 presupuestos, 60 componentes, ingeridos con
 > `pseudonymize: false`, modelo `text-embedding-3-small` (1536 dimensiones).
 
+> **Addendum (posterior al diagnóstico).** Este documento describe el servicio
+> tal como estaba al cierre de la S08. Después se añadió el índice **HNSW** sobre
+> `chunks.embedding` — `m = 16`, `ef_construction = 128`, `ef_search = 40`, ver
+> [spec 015](specs/015-session-9-hnsw-index.md). Ese cambio afecta **cómo** se
+> buscan los vecinos, no **qué** se compara ni qué se devuelve: los cinco fallos
+> de la sección 3 (comprensión de la consulta, ausencia de umbral, agregación por
+> presupuesto, horas padre, generación con citas) siguen igual de vigentes. Con
+> 60 chunks el planificador sigue eligiendo *sequential scan* por coste, así que
+> los números de la sección 2 no cambian. Las marcas «§ HNSW» señalan los puntos
+> del texto que hoy ya no son ciertos.
+
 > **Nota de fidelidad.** El enunciado describe el servicio con nombres genéricos
 > (`ingest/`, `embedding_pipeline/`, `storage/`) y una arquitectura de tres capas
 > con frontend, backend y servicio IA. Aquí las tres capas existen, con un
@@ -78,7 +89,7 @@ flowchart TB
         subgraph RAG["app/embedding_pipeline (RAG)"]
             CH["chunking/<br/>8 estrategias<br/>structural en ingesta"]
             EM["OpenAIEmbedder<br/>text-embedding-3-small · 1536d"]
-            ST[("store/ — pgvector<br/>documents + chunks<br/>cosine · sin índice")]
+            ST[("store/ — pgvector<br/>documents + chunks<br/>cosine · HNSW (spec 015)")]
             RT["SemanticRetriever"]
         end
 
@@ -128,7 +139,9 @@ sola transacción sobre pgvector.
 
 (b) **Búsqueda**: `/search` embebe el texto
 recibido con el mismo modelo y devuelve los *k* chunks más cercanos por
-distancia coseno, en SQL, con un *sequential scan* y sin índice vectorial.
+distancia coseno, en SQL. § HNSW: desde el spec 015 existe
+`ix_chunks_embedding_hnsw` y `ef_search = 40`; con 60 chunks el planificador
+sigue eligiendo *sequential scan*, que es la elección correcta a ese tamaño.
 
 (c) **Análisis**: `/embeddings/compare` reutiliza los mismos ocho chunkers y el
 mismo embedder para comparar estrategias, pero **no persiste nada** — por eso
@@ -433,9 +446,11 @@ Respuesta cruda (extracto; el JSON completo está en `examples/trace_s09_output.
   visto mezcla de sectores; honestamente, aquí no la hay.
 - **`k` fijo sin criterio de diversidad** — cubierto en el fallo 2 y el 3, se
   menciona aparte porque es la palanca más barata de probar.
-- **Sin índice vectorial.** Cierto y deliberado: el *sequential scan* es la línea
-  base que la sesión en vivo mide contra HNSW. Es un problema de latencia a
-  escala, no de calidad, y con 60 chunks no se nota.
+- **Sin índice vectorial (ya no).** § HNSW: el índice existe desde el spec 015
+  (`vector_cosine_ops`, `m = 16`, `ef_construction = 128`, `ef_search = 40`).
+  Sigue siendo un asunto de latencia a escala, no de calidad, y con 60 chunks el
+  planificador aún prefiere el *sequential scan*: el diagnóstico no cambia, solo
+  el estado del código.
 - **`chunk_id` es un id de base de datos**, no el id del corpus. Cualquier
   evaluación que se apoye en él cambia según el orden de ingesta; los ids
   trazables (`BUD-…::COMP-…`) viven en `metadata`.
