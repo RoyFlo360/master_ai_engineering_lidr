@@ -1,198 +1,117 @@
-"""HTTP-level tests for ``POST /search`` (Session 8).
+"""Boundary tests for the retired ``POST /search`` route (Session 10).
 
-``get_semantic_retriever`` is overridden with a fake; no Postgres, no OpenAI.
-The k bounds live in ``SearchRequest`` (422 before any I/O) and an empty corpus
-is a 200 with an empty result list.
+Spec 016 replaced ``/search`` with ``POST /v1/retrieval/search`` and deleted
+``app/embedding_pipeline/search_router.py``. What is left to assert here is the
+retirement itself: the old path is a 404 and is absent from the published schema,
+and the replacement is registered with the request and response models it
+promises. Behavioural coverage of the replacement — the four configurations, the
+422 bounds, the 502/500 failure bodies — lives in ``tests/test_retrieval_route.py``
+and is deliberately **not** repeated here. That file already pins the 200
+``RetrievalResult`` schema, so the one duplicate this rewrite would otherwise have
+introduced was dropped; what remains is the part that file does not check.
+
+Hermetic: ``TestClient`` against the application, no database, no provider, no
+model weights.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+from app.embedding_pipeline.schemas import MAX_QUERY_CHARS, MAX_SEARCH_K
+from app.generation.rag.retrieval.schemas import MAX_RECALL_K
 
-import pytest
-from fastapi.testclient import TestClient
+RETIRED_URL = "/search"
+URL = "/v1/retrieval/search"
 
-from app import main
-from app.dependencies import get_semantic_retriever
-from app.embedding_pipeline.schemas import SearchHit, SearchResponse
-
-URL = "/search"
-
-TRANSCRIPTS_DIR = Path(__file__).resolve().parent.parent / "examples" / "transcripts"
+#: Bounds the route's ``Field(...)`` declarations publish, restated here so a
+#: silent loosening of the contract fails this file rather than only a reviewer.
+MAX_RRF_K = 200
+MAX_DISTANCE_THRESHOLD = 2.0
 
 
-def make_hits() -> list[SearchHit]:
-    return [
-        SearchHit(
-            chunk_id=156,
-            document_id=12,
-            chunk_type="budget_component",
-            content="Backend service implementation with JWT-based authentication...",
-            distance=0.231,
-            metadata={"budget_id": "BUD-2024-001", "component_id": "AUTH-001"},
-        ),
-        SearchHit(
-            chunk_id=201,
-            document_id=3,
-            chunk_type="budget_component",
-            content="Payment gateway integration with PSD2 compliance...",
-            distance=0.305,
-            metadata={"budget_id": "BUD-2024-003", "component_id": "PAY-002"},
-        ),
-    ]
+def openapi_spec(client) -> dict:
+    return client.get("/openapi.json").json()
 
 
-class FakeRetriever:
-    def __init__(self, hits: list[SearchHit] | None = None) -> None:
-        self.hits = hits if hits is not None else make_hits()
-        self.calls: list[dict] = []
-
-    async def search(self, *, query: str, k: int) -> SearchResponse:
-        self.calls.append({"query": query, "k": k})
-        return SearchResponse(query=query, k=k, search_time_ms=87, results=self.hits[:k])
+def resolve(prop: dict, spec: dict) -> dict:
+    """Follow a local ``$ref`` one level, so bounds are readable either way."""
+    reference = prop.get("$ref")
+    if not reference:
+        return prop
+    return spec["components"]["schemas"][reference.rsplit("/", 1)[-1]]
 
 
-@pytest.fixture
-def wired(client: TestClient):
-    def _wire(retriever) -> TestClient:
-        main.app.dependency_overrides[get_semantic_retriever] = lambda: retriever
-        return client
+def real_type(prop: dict, spec: dict) -> dict:
+    """The non-``null`` branch of a property that pydantic rendered as ``anyOf``.
 
-    yield _wire
-    main.app.dependency_overrides.clear()
-
-
-def test_search_returns_ranked_hits_with_full_contract(wired) -> None:
-    fake = FakeRetriever()
-    client = wired(fake)
-
-    response = client.post(URL, json={"query": "OAuth for fintech", "k": 5})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["query"] == "OAuth for fintech"
-    assert body["k"] == 5
-    assert body["search_time_ms"] == 87
-    distances = [hit["distance"] for hit in body["results"]]
-    assert distances == sorted(distances)
-    first = body["results"][0]
-    assert set(first) == {
-        "chunk_id",
-        "document_id",
-        "chunk_type",
-        "content",
-        "distance",
-        "metadata",
-    }
-    assert fake.calls == [{"query": "OAuth for fintech", "k": 5}]
-
-
-def test_search_k_defaults_to_5(wired) -> None:
-    fake = FakeRetriever()
-    client = wired(fake)
-
-    response = client.post(URL, json={"query": "anything"})
-
-    assert response.status_code == 200
-    assert fake.calls[0]["k"] == 5
-
-
-def test_search_respects_k(wired) -> None:
-    client = wired(FakeRetriever())
-
-    response = client.post(URL, json={"query": "anything", "k": 1})
-
-    assert response.status_code == 200
-    assert len(response.json()["results"]) == 1
-
-
-@pytest.mark.parametrize("k", [0, -1, 51, 999])
-def test_search_k_out_of_bounds_returns_422(wired, k: int) -> None:
-    fake = FakeRetriever()
-    client = wired(fake)
-
-    response = client.post(URL, json={"query": "anything", "k": k})
-
-    assert response.status_code == 422
-    assert fake.calls == []
-
-
-@pytest.mark.parametrize("payload", [{}, {"query": ""}, {"query": "x", "extra": 1}])
-def test_search_invalid_body_returns_422(wired, payload) -> None:
-    fake = FakeRetriever()
-    client = wired(fake)
-
-    assert client.post(URL, json=payload).status_code == 422
-    assert fake.calls == []
-
-
-@pytest.mark.parametrize("name", ["01_clear.txt", "02_ambiguous.txt", "03_hard.txt"])
-def test_search_accepts_a_whole_transcript(wired, name: str) -> None:
-    """A raw meeting transcript reaches the retriever intact (Session 9).
-
-    The old 2,000-character cap rejected two of the three probe transcripts at
-    validation time, before any embedding was attempted. This pins the raised
-    bound at the HTTP edge, where the trace actually hit it.
+    ``int | None`` becomes ``{"anyOf": [{"type": "integer", ...}, {"type":
+    "null"}]}``, so a bound or an enum can sit one level below the property.
     """
-    fake = FakeRetriever()
-    client = wired(fake)
-    transcript = (TRANSCRIPTS_DIR / name).read_text(encoding="utf-8")
-
-    response = client.post(URL, json={"query": transcript, "k": 5})
-
-    assert response.status_code == 200
-    assert fake.calls == [{"query": transcript, "k": 5}]
+    for branch in prop.get("anyOf", [prop]):
+        if branch.get("type") != "null":
+            return resolve(branch, spec)
+    return resolve(prop, spec)
 
 
-def test_the_old_query_bound_would_have_rejected_two_of_three_transcripts() -> None:
-    """Why the bound moved: two of the three probe files exceed 2,000 characters.
-
-    ``01_clear.txt`` is short enough to have passed the old cap; that asymmetry is
-    exactly what made the failure look intermittent rather than systematic.
-    """
-    lengths = {
-        name: len((TRANSCRIPTS_DIR / name).read_text(encoding="utf-8"))
-        for name in ("01_clear.txt", "02_ambiguous.txt", "03_hard.txt")
-    }
-
-    assert lengths["01_clear.txt"] <= 2_000
-    assert lengths["02_ambiguous.txt"] > 2_000
-    assert lengths["03_hard.txt"] > 2_000
+def numeric_bounds(prop: dict, spec: dict) -> tuple[float | None, float | None]:
+    branch = real_type(prop, spec)
+    return branch.get("minimum"), branch.get("maximum")
 
 
-def test_search_empty_corpus_returns_200_with_no_results(wired) -> None:
-    client = wired(FakeRetriever(hits=[]))
-
-    response = client.post(URL, json={"query": "anything", "k": 5})
-
-    assert response.status_code == 200
-    assert response.json()["results"] == []
+# --- the retirement ---------------------------------------------------------
 
 
-def test_search_retriever_unavailable_returns_500(wired) -> None:
-    client = wired(None)
+def test_the_retired_search_route_returns_404(client) -> None:
+    """The Session-8 body is still a valid-looking request; the route is gone."""
+    response = client.post(RETIRED_URL, json={"query": "OAuth for fintech", "k": 5})
 
-    response = client.post(URL, json={"query": "anything", "k": 5})
-
-    assert response.status_code == 500
-    assert response.json() == {"detail": "Embedding service is not available."}
-
-
-def test_search_embedding_failure_returns_500_without_leaking_detail(wired) -> None:
-    class ExplodingRetriever(FakeRetriever):
-        async def search(self, **kwargs):
-            raise RuntimeError("sk-secret embeddings API down")
-
-    client = wired(ExplodingRetriever())
-
-    response = client.post(URL, json={"query": "anything", "k": 5})
-
-    assert response.status_code == 500
-    assert response.json() == {"detail": "Failed to run semantic search."}
-    assert "sk-secret" not in response.text
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
 
 
-def test_search_route_is_documented_in_openapi(client: TestClient) -> None:
-    spec = client.get("/openapi.json").json()
+def test_the_retired_search_route_is_absent_from_openapi(client) -> None:
+    assert RETIRED_URL not in openapi_spec(client)["paths"]
+
+
+# --- the replacement -------------------------------------------------------
+
+
+def test_the_replacement_route_is_registered_with_its_models(client) -> None:
+    spec = openapi_spec(client)
+
     assert URL in spec["paths"]
-    assert "post" in spec["paths"][URL]
+    operation = spec["paths"][URL]["post"]
+    body = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    response = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    assert body.endswith("RetrievalRequest")
+    assert response.endswith("RetrievalResult")
+    # Bad bounds are documented as a 422, not as a 500.
+    assert "422" in operation["responses"]
+
+
+def test_the_published_request_schema_keeps_the_contract_bounds(client) -> None:
+    """The bounds a client can rely on, read from the published schema."""
+    spec = openapi_spec(client)
+    properties = spec["components"]["schemas"]["RetrievalRequest"]["properties"]
+
+    assert properties["query"]["minLength"] == 1
+    assert properties["query"]["maxLength"] == MAX_QUERY_CHARS == 20_000
+    assert properties["top_k"]["maximum"] == MAX_SEARCH_K == 50
+    assert properties["top_k"]["default"] == 10
+    assert properties["recall_k"]["maximum"] == MAX_RECALL_K == 200
+    assert properties["recall_k"]["default"] == 50
+    assert numeric_bounds(properties["rrf_k"], spec) == (1, MAX_RRF_K)
+    assert numeric_bounds(properties["distance_threshold"], spec) == (
+        0.0,
+        MAX_DISTANCE_THRESHOLD,
+    )
+    # A closed literal, not a free string: an unknown mode is a 422 client bug.
+    assert real_type(properties["search_mode"], spec)["enum"] == ["vector", "hybrid"]
+
+
+def test_the_replacement_route_requires_no_authentication(client) -> None:
+    """No security on the replacement, consistent with the rest of the repository.
+
+    Spec 016 records the decision: adding an auth scheme to one route only would
+    make this service internally inconsistent.
+    """
+    assert "security" not in openapi_spec(client)["paths"][URL]["post"]

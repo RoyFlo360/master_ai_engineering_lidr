@@ -19,8 +19,10 @@ for finding *that* a decision exists.
 | 011 | [Session 7: data ingestion](../specs/011-session-7-data-ingestion.md) | Implemented | Catalog-driven ingestion with clean/validate, pseudonymization, job records and two HTTP endpoints. |
 | 012 | [Session 8: pgvector persistence and semantic search](../specs/012-session-8-pgvector-and-search.md) | Implemented | `documents`/`chunks` on their own declarative base, a dialect-guarded migration, one-transaction ingest with a unique `source_path`, and k-NN search by cosine distance. No vector index, by design — the index is spec 015. |
 | 013 | [Session 8 extras: chunking lab (and runtime model configuration, deferred)](../specs/013-session-8-runtime-config-and-chunking-lab.md) | Implemented (chunking lab) | Eight chunkers behind one `Chunker` ABC, compared by `POST /embeddings/compare` and `scripts/compare_chunkers.py`, with the results in `COMPARISON_REPORT.md`. Runtime model overrides (`GET/PUT /api/v1/config/models`) were deferred. |
-| 014 | [Session 9: architectural diagnostic and the search query bound](../specs/014-session-9-prework-trace.md) | Implemented | `arquitectura-actual.md`, the three probe transcripts and a trace client. One code change: `MAX_QUERY_CHARS` 2,000 → 20,000 so a whole meeting transcript can be searched. No retrieval behaviour changed. |
+| 014 | [Session 9: architectural diagnostic and the search query bound](../specs/014-session-9-prework-trace.md) | Implemented | `arquitectura-actual.md`, the three probe transcripts and a trace client. One code change: `MAX_QUERY_CHARS` 2,000 → 20,000 so a whole meeting transcript can be searched (the bound survives on `/v1/retrieval/search`). No retrieval behaviour changed. |
 | 015 | [Session 9: HNSW index and query-time ef_search](../specs/015-session-9-hnsw-index.md) | Implemented | `ix_chunks_embedding_hnsw` on `chunks.embedding` (`vector_cosine_ops`, m = 16, ef_construction = 128) and `SET LOCAL hnsw.ef_search = 40` in `ChunkStore.search`. Replaces spec 012's sequential-scan baseline; no retrieval semantics change. |
+| 016 | [Session 10: hybrid search and cross-encoder reranking](../specs/016-session-10-hybrid-and-rerank.md) | Implemented | Vector and full-text branches fused with RRF, an optional cross-encoder rerank, `POST /v1/retrieval/search`, and migration `0004_rag_fts`. Measured on 60 chunks: hybrid showed no lift and reranking cost ~36× latency for no precision@5 gain, so both stay off by default. |
+| 017 | [Session 10: grounded estimation from a transcript](../specs/017-session-10-grounded-estimation.md) | Implemented | The T0B chain — reformulate, retrieve behind a 0.65 distance floor, assemble `<source>` context, generate, validate citations with one corrective retry — behind `POST /v1/estimate/from-transcript` and four stage routes, with an in-process idempotency store. An unrelated brief returns `grounded=false` instead of a guess. |
 
 `specs/TEMPLATE.md` is the starting point for a new spec; `specs/README.md` explains
 the workflow and status vocabulary.
@@ -45,3 +47,12 @@ the workflow and status vocabulary.
 - 014 is **Implemented**: the Session-9 diagnosis, its artifacts and the one
   enabling change (the `/search` query bound). It deliberately implements none of
   the evolution the deliverable proposes.
+- 016 is **Implemented**: the retrieval half of the Session-10 brief. It records
+  composition (a reformulator and a grounded estimate) as not shipped; that landed
+  afterwards as spec 017, so the "no composition" limitation 016 left in
+  `docs/architecture.md` is retired. Spec 016 retires `POST /search`; the route
+  is no longer mounted.
+- 017 is **Implemented**: the generation half of the Session-10 brief, including
+  the distance floor that turns an unrelated brief into `grounded=false`. Its
+  non-goals follow the brief (no metadata filters, no query expansion, no
+  multi-index routing), and it adds none of them.

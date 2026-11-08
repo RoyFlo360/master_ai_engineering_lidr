@@ -1,0 +1,39 @@
+{
+  "description": "Session 10 golden set for retrieval evaluation. Five representative project descriptions to estimate, each hand-annotated with the historical budgets that are genuine analogues. Graded over data/budgets_sample.json, restricted to chunk_type='budget_component', so the score does not depend on whether any other corpus has been ingested. A retrieved chunk counts as relevant iff its parent budget_id is in relevant_budget_ids.",
+  "corpus": "data/budgets_sample.json",
+  "chunk_types": ["budget_component"],
+  "k": 5,
+  "label_criterion": "A budget is relevant when it is a plausible analogue for estimating the query's project: same domain AND overlapping functionality, not merely the same sector. Same-sector budgets with unrelated work are deliberately excluded and are named as traps in each query's note. The set is adopted from the course reference (ai-engineering origin/session_10, evals/golden_retrieval.json); every id was re-checked against data/budgets_sample.json on 2026-11-07, and the borderline inclusions are called out in the notes rather than silently kept.",
+  "queries": [
+    {
+      "id": "Q1",
+      "query": "Mobile banking application with OAuth2 authentication, PSD2 open banking compliance, strong customer authentication and a transaction ledger.",
+      "relevant_budget_ids": ["BUD-2024-001", "BUD-2024-003"],
+      "note": "Fintech authentication + payments. BUD-2024-001 is the exact functional match. BUD-2024-003 (real-time payments gateway) is included as a borderline analogue: same sector and it owns the transaction-ledger vocabulary, but it is not a banking-auth project — if precision looks inflated, this is the label to revisit. Trap: BUD-2024-006 (e-commerce marketplace vendor payouts) is 'payments-like' but wrong domain; BUD-2024-016 (core banking decomposition) is banking but a refactor, not a build."
+    },
+    {
+      "id": "Q2",
+      "query": "Headless e-commerce storefront with a product catalog, shopping cart checkout and personalized product recommendations.",
+      "relevant_budget_ids": ["BUD-2024-005", "BUD-2024-006", "BUD-2024-007", "BUD-2024-017"],
+      "note": "E-commerce storefront/catalog/checkout. BUD-2024-005 is the exact match; BUD-2024-017 (e-commerce MVP) is a scoped-down build of the same shape. BUD-2024-006 (multi-vendor marketplace) and BUD-2024-007 (grocery delivery) are the loosest labels in this set — same sector, different product surface; kept because an estimator would still read their component lists. Trap: finance payment budgets (BUD-2024-003) and healthcare scheduling share topic words, not domain."
+    },
+    {
+      "id": "Q3",
+      "query": "Telemedicine platform for patient appointment scheduling and video consultations with HL7/FHIR integration and clinical records.",
+      "relevant_budget_ids": ["BUD-2024-009", "BUD-2024-010"],
+      "note": "Healthcare telemedicine. BUD-2024-009 is the exact match. BUD-2024-010 (remote patient monitoring) is a borderline analogue: same clinical data pipeline, no appointment or consultation work. Trap: BUD-2024-011 (pharmacy inventory) and BUD-2024-012 (clinical trials) share the healthcare sector and cover different functionality."
+    },
+    {
+      "id": "Q4",
+      "query": "Industrial IoT platform ingesting sensor telemetry for predictive maintenance and real-time equipment monitoring in a factory.",
+      "relevant_budget_ids": ["BUD-2024-013", "BUD-2024-015"],
+      "note": "Industrial telemetry and monitoring. BUD-2024-013 is the exact match. BUD-2024-015 (energy grid monitoring) is a borderline analogue: same telemetry-and-alerting shape, different asset class. Trap: BUD-2024-014 (warehouse AGV coordination) is industrial but logistics, not telemetry-driven maintenance."
+    },
+    {
+      "id": "Q5",
+      "query": "Real-time payments gateway with fraud detection, transaction reconciliation and a double-entry ledger.",
+      "relevant_budget_ids": ["BUD-2024-003", "BUD-2024-001"],
+      "note": "Fintech payments. BUD-2024-003 is the exact match; BUD-2024-001 (mobile banking API) is the borderline mirror of Q1's inclusion — same ledger and auth surface, different delivery. Trap: BUD-2024-006 (e-commerce vendor payouts) and BUD-2024-007 (grocery delivery payments) are lexically near but wrong domain."
+    }
+  ]
+}

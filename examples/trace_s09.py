@@ -8,12 +8,17 @@ thresholded — that is live-session work.
 Step 1 embeds the full transcript with the same model the service uses at ingest
 time (``text-embedding-3-small``, 1536 dims) and prints its dimensionality, L2
 norm and its first and last components. There is no endpoint that returns a raw
-vector (embedding happens *inside* ``/search``), so this call goes through the
-embedder module directly.
+vector (embedding happens *inside* ``/v1/retrieval/search``), so this call goes
+through the embedder module directly.
 
-Step 2 posts the same text to ``POST /search`` with ``k=5`` and prints the raw
-JSON response plus a compact table. ``/search`` re-embeds the same text with the
-same model, so the vector ranked in step 2 is the one shown in step 1.
+Step 2 posts the same text to ``POST /v1/retrieval/search`` with ``top_k=5`` and
+prints the raw JSON response plus a compact table.
+
+``/v1/retrieval/search`` re-embeds the same text with the same model, so the
+vector ranked in step 2 is the one shown in step 1. The route is the Session-10
+replacement for the Session-8 ``POST /search`` it traced originally (spec 016);
+what the step measures — the same query, the same k, the same distances — is
+unchanged, only the surface it fetches those distances from.
 
 Usage::
 
@@ -88,7 +93,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--json-out",
         default=None,
-        help="Write the raw /search response body to this path.",
+        help="Write the raw /v1/retrieval/search response body to this path.",
     )
     parser.add_argument(
         "--dry-run",
@@ -151,13 +156,23 @@ def step_embed(transcript_path: Path, text: str) -> list[float]:
     return vector
 
 
-def step_search(base_url: str, text: str, k: int, json_out: str | None) -> dict:
-    """Step 2: POST the transcript to /search and print the raw response."""
-    payload = {"query": text, "k": k}
-    url = f"{base_url}/search"
+def format_distance(distance: float | None) -> str:
+    """Render a hit's distance, or ``n/a`` when the hit has no distance.
 
-    print_header(f"PASO 2 — POST {url}  (k={k}, query = transcripción completa)")
-    print(f"payload         : query ({len(text)} chars) + k={k}")
+    The Session-10 contract reports ``distance: null`` for a lexical-only hit
+    rather than a sentinel value, which can happen when the deployment defaults
+    to ``RETRIEVAL_SEARCH_MODE=hybrid``.
+    """
+    return "n/a" if distance is None else f"{distance:.{DISTANCE_DECIMALS}f}"
+
+
+def step_search(base_url: str, text: str, k: int, json_out: str | None) -> dict:
+    """Step 2: POST the transcript to /v1/retrieval/search, print the response."""
+    payload = {"query": text, "top_k": k}
+    url = f"{base_url}/v1/retrieval/search"
+
+    print_header(f"PASO 2 — POST {url}  (top_k={k}, query = transcripción completa)")
+    print(f"payload         : query ({len(text)} chars) + top_k={k}")
 
     with httpx.Client(timeout=120.0) as client:
         response = client.post(url, json=payload)
@@ -171,28 +186,29 @@ def step_search(base_url: str, text: str, k: int, json_out: str | None) -> dict:
         print(response.text)
         print()
         print(
-            "ERROR: /search rejected the transcript. Nothing was embedded for the "
-            "second step.",
+            "ERROR: /v1/retrieval/search rejected the transcript. Nothing was "
+            "embedded for the second step.",
             file=sys.stderr,
         )
         raise SystemExit(EXIT_SEARCH_FAILED)
 
     body = response.json()
     print(f"search_time_ms  : {body['search_time_ms']}")
-    print(f"results         : {len(body['results'])}")
+    print(f"results         : {len(body['chunks'])}")
     print()
     print(
         f"  {'rank':>4}  {'chunk_id':>8}  {'distance':>8}  {'budget_id':<14}  "
         f"{'component_id':<14}  {'sector':<11}  content"
     )
-    for rank, hit in enumerate(body["results"], start=1):
-        metadata = hit.get("metadata") or {}
+    # budget_id, component_id and sector are top-level fields on the Session-10
+    # response; the nested ``metadata`` object this table used to read is gone.
+    for rank, hit in enumerate(body["chunks"], start=1):
         preview = " ".join(hit["content"].split())[:CONTENT_PREVIEW_CHARS]
         print(
-            f"  {rank:>4}  {hit['chunk_id']:>8}  {hit['distance']:>8.{DISTANCE_DECIMALS}f}  "
-            f"{str(metadata.get('budget_id', '?')):<14}  "
-            f"{str(metadata.get('component_id', '?')):<14}  "
-            f"{str(metadata.get('client_sector', '?')):<11}  {preview}"
+            f"  {rank:>4}  {hit['chunk_id']:>8}  {format_distance(hit['distance']):>8}  "
+            f"{str(hit.get('budget_id') or '?'):<14}  "
+            f"{str(hit.get('component_id') or '?'):<14}  "
+            f"{str(hit.get('sector') or '?'):<11}  {preview}"
         )
     print()
 

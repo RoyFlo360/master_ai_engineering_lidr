@@ -99,6 +99,9 @@ docker compose up -d redis     # just Redis on localhost:6379, for local (non-Do
   Actor-Critic-Boss loop; returns the structured estimation plus the `acb` audit trail.
 - `GET /sessions/{session_id}` — session metadata, history length, anchor count, summary
   size and the last resolved audience tier (debug view).
+- `POST /v1/estimate/from-transcript` — a meeting transcript in, a grounded estimate
+  with per-claim citations out; `grounded=false` means the corpus had no analogue and
+  the model was never called.
 - `GET /health`, `GET /docs`.
 
 ### POST /api/v1/new-estimate
@@ -280,21 +283,38 @@ if the embeddings API fails, nothing is committed and no orphan `documents` row
 survives. The `409` body is top-level, not nested under `detail` — the one
 deliberate exception in the API.
 
+### Session 10 retrieval: hybrid search and reranking
+
+`POST /v1/retrieval/search` is the query-time pipeline; it replaces the retired
+Session-8 `/search` route. Same corpus, `top_k` 1–50 (default 10), plus `recall_k`
+1–200 and two switches — `search_mode: "vector" | "hybrid"` and
+`rerank: true | false` — defaulting to `RETRIEVAL_SEARCH_MODE=vector` and
+`RERANKER_ENABLED=false`. Hybrid fuses the vector and full-text branches with RRF
+(`RRF_K=60`); reranking runs a cross-encoder over `RETRIEVAL_RECALL_TOP_K=50`
+candidates and keeps `RERANK_TOP_N=5`. `rerank=true` downloads ~120 MB of weights
+on first use and returns `502` if the model cannot load.
+
 ```shell
-POST /search
-{"query": "REST API with OAuth authentication for fintech sector", "k": 5}
-→ 200 {"query": "...", "k": 5, "search_time_ms": 87,
-        "results": [{"chunk_id": 156, "document_id": 12,
-                     "chunk_type": "budget_component", "content": "...",
-                     "distance": 0.231, "metadata": {...}}]}
+POST /v1/retrieval/search
+{"query": "REST API with OAuth authentication for fintech sector", "top_k": 5}
+→ 200 {"chunks": [{"chunk_id": 156, "document_id": 12,
+                   "budget_id": "BUD-2024-001", "component_id": "AUTH-001",
+                   "chunk_type": "budget_component", "content": "...",
+                   "sector": "finance", "project_year": 2024,
+                   "distance": 0.231, "rank": null, "source": "vector"}],
+        "search_mode": "vector", "rerank": false,
+        "candidates_evaluated": 5, "search_time_ms": 87,
+        "low_confidence": false}
 ```
 
-`distance` is **cosine distance** (lower = more similar), ascending. `422` for a
-bad body or `k` outside `1..50`; an empty corpus is a `200` with `results: []`;
-`500` with a generic body when the service cannot run (no `OPENAI_API_KEY`, a
-non-Postgres `DATABASE_URL`, or a mismatched embedding model), and `503` when
-`pseudonymize` is set but no pseudonymizer is configured. Details go to the
-log, never the response.
+`distance` is cosine **distance** (lower = more similar); it is `null` on a
+lexical-only hit, and `source` says which branch produced the chunk. An empty
+corpus is a `200` with `chunks: []` and `low_confidence: true`.
+
+```shell
+docker compose exec api python -m app.generation.rag.retrieval.verify_reranker  # gate: exit 0 = ready
+uv run python scripts/eval_retrieval_s10.py                                    # four configs: A/B/C/D
+```
 
 ### Four schema decisions worth defending
 
@@ -322,8 +342,9 @@ log, never the response.
 
 The vector store needs **Postgres** (`pgvector/pgvector:pg16`, already in
 compose) and **`OPENAI_API_KEY`**. A SQLite `DATABASE_URL` keeps every other flow
-working; `/embeddings/ingest` and `/search` return the generic 500 instead of
-failing with a schema error.
+working; `/embeddings/ingest`, `/v1/retrieval/search` and
+`/v1/estimate/from-transcript` return the generic 500 instead of failing with a
+schema error.
 
 With the 17-budget sample: **60 chunks, 5,970 tokens** — one document per budget.
 
@@ -338,18 +359,46 @@ budgets answer 409 and are skipped) and runs the five query angles from the
 brief. Its real output against the sample corpus is in
 [`output_examples.txt`](output_examples.txt).
 
-### What retrieval cannot do yet (Session 9)
+### Session 10 estimation: transcript to grounded estimate
 
-[`arquitectura-actual.md`](arquitectura-actual.md) traces a raw meeting
-transcript through this pipeline and diagnoses where it stops: the system returns
-ranked components, never an estimate. Re-run the trace with
-`uv run --env-file .env python examples/trace_s09.py examples/transcripts/02_ambiguous.txt`
-(it needs the stack up and the corpus ingested). The document is a diagnosis, not
-a roadmap: none of the modules it proposes exist.
+`POST /v1/estimate/from-transcript` closes the loop between the corpus and an
+estimate. It reformulates the transcript into an English search query, retrieves
+with a distance floor, assembles the chunks into `<source>` blocks, generates one
+estimate, and validates every citation against the ids that actually reached the
+prompt (one corrective retry).
 
-The one code change that session made is the `/search` query bound — 2,000 →
-20,000 characters, so a whole transcript can be searched. See
-[spec 014](specs/014-session-9-prework-trace.md).
+```shell
+POST /v1/estimate/from-transcript
+{"transcript": "…100–50,000 characters…", "top_k": 5, "idempotency_key": "req-42"}
+→ 200 {"estimate": {"summary": "…", "modules": [...], "total_hours": 120,
+                   "citations": [{"chunk_id": 7, "budget_id": "BUD-2024-001",
+                                  "claim": "…"}],
+                   "confidence_pct": 72, "grounded": true},
+        "query": {"summary": "…", "search_query": "…", "confidence": 0.8,
+                  "source": "llm"},
+        "chunks": [...], "retrieved": 5, "cached": false,
+        "validation_retries": 0, "pipeline_ms": 4210}
+```
+
+- **`grounded=false` is an answer, not an error.** No chunk came within
+  `RETRIEVAL_DISTANCE_THRESHOLD=0.65` (an upper bound on cosine distance), so the
+  model was never called: no modules, no hours, `citations=[]`, `confidence_pct=0`.
+- **The floor is the chain's, not retrieval's.** `/v1/retrieval/search` still
+  returns the nearest chunks when nothing is relevant.
+- **Citations are checked against `sources_of(context)`**, so a chunk dropped for
+  the 3,000-token budget cannot be cited. Failure after the one retry is a 502.
+- **Idempotency is in-process.** A replay with the same key returns
+  `cached=true` and the stored `pipeline_ms`; a restart forgets it.
+- Each step is also callable alone: `POST /v1/estimate/stages/reformulate`,
+  `/retrieve`, `/assemble`, `/generate` — stateless, for debugging.
+
+[`arquitectura-actual.md`](arquitectura-actual.md) is the Session-9 diagnosis that
+motivated this: a raw transcript traced through the retrieval route, and the
+places it dead-ended. It is history now; the modules it proposed exist. The other
+Session-9 change — the query bound, 2,000 → 20,000 characters (`MAX_QUERY_CHARS`)
+— still lives on `/v1/retrieval/search`. See
+[spec 014](specs/014-session-9-prework-trace.md) and
+[spec 017](specs/017-session-10-grounded-estimation.md).
 
 ### Sanity check: `scripts/compare.py`
 
@@ -672,6 +721,9 @@ uv run pytest tests/test_estimations_api.py -v   # one file
 uv run pytest tests/test_llm_service.py -v
 uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost_after_the_tokens" -v
 ```
+
+Measured today: **813 passed, 24 skipped** — the skips are the opt-in Postgres
+tests (set `TEST_DATABASE_URL` to run them; they need a live database).
 
 The suite is hermetic: settings are built in-process (`_env_file=None`), both provider
 paths are stubbed — a recorder for `/estimate`, an injected fake wrapper for the

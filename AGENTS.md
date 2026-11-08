@@ -20,7 +20,7 @@ ingestion jobs and pseudonym mappings, and — since Session 8 — the pgvector
 ## Layout
 
 ```
-app/main.py                    FastAPI app, CORS, /health, lifespan; mounts the estimations, sessions, embeddings, search and ingestion routers
+app/main.py                    FastAPI app, CORS, /health, lifespan; mounts the estimations, sessions, embeddings, retrieval, estimate and ingestion routers
 app/config.py                  Settings (pydantic-settings, reads root .env)
 app/dependencies.py            lru_cache factories: get_cache, get_llm_wrapper, get_usage_ledger, get_openai_client (None without OPENAI_API_KEY), get_semantic_cache (None unless Redis has RediSearch), get_estimation_service, get_session_store; plus chunk_store / rag_ingest_service / semantic_retriever (None without a key, a Postgres URL and a 1536-dim model) and the eight chunker factories behind build_chunkers/ALL_STRATEGIES
 app/routers/estimations.py     the transcription + typed-v1 HTTP endpoints
@@ -50,7 +50,9 @@ app/guardrails/input.py        moderation + prompt-injection + PII checks
 app/guardrails/output.py       enforce_scope_response low-confidence filter
 app/context/examples.py        reference examples for the LEGACY flows
 app/prompts/loader.py          Jinja2 loader; prompts live at <use_case>/<version>/<role>.j2
-app/embedding_pipeline/        embeddings + RAG: schemas, chunker, chunking/ (Chunker ABC + 8 strategies), analysis/ (cosine, comparator), embedder, ingest_service, retriever, router, search_router, store/ (pgvector ORM + repository), SANITY_CHECK.md, COMPARISON_REPORT.md
+app/embedding_pipeline/        the CORPUS half of RAG: schemas, chunker, chunking/ (Chunker ABC + 8 strategies), analysis/ (cosine, comparator), embedder, ingest_service, retriever, router, store/ (pgvector ORM + repository), SANITY_CHECK.md, COMPARISON_REPORT.md
+app/generation/rag/retrieval/  the QUERY half of RAG (Session 10): schemas (RetrievedChunk/RetrievalResult/RetrievalRequest), errors, fusion (RRF), pipeline (the four vector/hybrid x rerank configurations), reranker (cross-encoder), verify_reranker (pre-flight gate), router (/v1/retrieval/search), README.md (the boundary note)
+app/generation/rag/            the ESTIMATION chain (Session 10, T0B), mounted at /v1/estimate: schemas (EstimationQuery, Citation, GroundedEstimate, request/response), errors (each class carries its HTTP status), observability (per-stage timer), query_reformulator (transcript -> EstimationQuery, non-fatal fallback), context_assembler (pure: <source> blocks + sources_of), estimator (the one grounded generation turn), validation (citations vs sources_of), idempotency (in-process, 256 entries, FIFO), orchestrator (estimate_from_transcript = the chain order), estimate_router (/v1/estimate/from-transcript + four /stages/*)
 app/ingestion/                 Session 7 (extension) data ingestion: catalog, parsers, cleaning, pii, orchestrator, architecture
 app/persistence/               Session 7 (extension) SQLAlchemy models + repositories (jobs, pseudonym mappings)
 app/routers/ingestion.py       POST /api/v1/ingestion/runs + GET /api/v1/ingestion/jobs/{id}
@@ -59,33 +61,55 @@ scripts/compare.py             cosine similarity CLI for the embedding sanity ch
 scripts/compare_chunkers.py    chunking-strategy comparison CLI (writes COMPARISON_REPORT.md)
 scripts/query_examples.py      idempotent corpus ingest + five query angles (retrieval evidence)
 examples/transcripts/          Session-9 probe transcripts (01_clear, 02_ambiguous, 03_hard) + TEMPLATE.md
-examples/trace_s09.py          Session-9 trace client: embed a transcript, POST /search, print the raw response
+examples/trace_s09.py          Session-9 trace client: embed a transcript, POST /v1/retrieval/search, print the raw response
 arquitectura-actual.md         Session-9 diagnostic deliverable (4 sections + appendix)
 data/budgets_sample.json       17 normalized budgets -> 60 chunks (Track B)
 data/catalog/catalog.yaml      audited sources with include/review/exclude decisions (Track A)
 data/seed/                     budgets, transcripts and the excluded rate card (Track A)
-alembic/                       three migrations: pseudonym_mappings + ingestion_jobs; documents + chunks (Postgres-only); the HNSW index on chunks.embedding
+alembic/                       four migrations: pseudonym_mappings + ingestion_jobs; documents + chunks (Postgres-only); the HNSW index on chunks.embedding; chunks.content_tsv + its GIN index (Postgres-only, Session 10)
 docs/                          architecture, stack, flows, data model, operations, glossary, decisions
-rules/                         development, API, testing, QA, security and documentation rules
+rules/                         development, API, testing, QA, security, documentation and close-out rules
 app/prompts/estimation/v1/     system.j2, user.j2, examples.j2  (the typed v1 flow)
 app/prompts/estimation/v2/     system.j2, user.j2  (conversational baseline; adds <project_metadata>)
 app/prompts/estimation/v3/     system.j2, user.j2  (v2 + <audience> tier block + <output_schema>; user adds <critic_feedback>)
 app/prompts/critic/v1/         the independent-auditor prompts
 app/prompts/conversation_summary/v1/  the cumulative summarizer prompts
 app/prompts/metadata_extraction/v1/  per-turn metadata extractor prompts
+app/prompts/rag_reformulation/v1/  system.j2, user.j2 (transcript -> English search_query + structured brief)
+app/prompts/rag_grounded_estimation/v1/  system.j2, user.j2 (<sources> + <project_brief>; optional <validation_feedback> on the retry)
 streamlit_app.py               streaming client (SSE) for /estimate/stream
 streamlit_app_estimation_api.py  JSON client for /estimate
 streamlit_app_loader.py        two-tab client: typed /new-estimate + conversational /sessions — the one compose runs
 evals/                         golden-set harness: dataset.py, metrics.py, run.py (CLI), golden_dataset.json (16 cases)
 evals/stress/                  Session-6 stress harness: scenarios.py, metrics.py, run.py, analyze.py, fixtures/build_pdfs.py, REPORT.md
-tests/                         hermetic pytest suite (664 passing today + 18 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
-specs/                         spec-driven decisions, numbered 001–013; README.md explains the convention. 012 is Implemented, 013 is Implemented for the chunking lab with runtime model config deferred
-MISSING-session{6,7,8}.md      gap analyses vs. the reference `ai-engineering/estimator` project, one per session
+tests/                         hermetic pytest suite (813 passing today + 24 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
+specs/                         spec-driven decisions, numbered 001–017; README.md explains the convention. 012–017 Implemented; 013's runtime model config still deferred
+MISSING-session{6..10}.md      gap analyses vs. the reference `ai-engineering/estimator` project, one per session (in docs/instrucctions-missing/)
 Dockerfile                     python:3.14-slim; uv sync --frozen --no-install-project; one image serves both api and streamlit
 docker-compose.yml             redis-stack:7.4.0-v0 + api + streamlit; repo bind-mounted at /srv/app
 .streamlit/config.toml         Streamlit runOnSave (Streamlit reads only .streamlit/, never a root config.toml)
 src/master_ai_engineering_lidr/__init__.py  uv_build package stub; its console script just prints hello and is NOT installed in the image
 ```
+
+### RAG is two packages, on purpose
+
+| Package | Owns | Lifecycle |
+| --- | --- | --- |
+| `app/embedding_pipeline/` | the **corpus**: chunk → embed → persist → `chunks` table | offline, batched, per document |
+| `app/generation/rag/retrieval/` | the **query**: lexical + vector → RRF → rerank → `/v1/retrieval/search` | per request, milliseconds |
+
+The edge is **one-way**: the query half imports `ChunkStore`/`OpenAIEmbedder` from the
+corpus half; nothing there imports back. They meet at `ChunkStore` (data) and at
+`RetrievedChunk` (the contract). `app/generation/rag/retrieval/README.md` is the
+boundary note — read it before adding a module to either side. Splitting them was
+spec 016's decision, not an accident of history.
+
+A third layer sits on top, and it is a **consumer**, not a third half:
+`app/generation/rag/*` (the modules beside `retrieval/`) turns a transcript into an
+estimate by calling `retrieval.pipeline.retrieve` and taking `RetrievedChunk` as
+input. It re-implements neither, and the retrieval half never imports it.
+`app/generation/rag/schemas.py` keeps `EstimateFromTranscriptResponse.chunks` a
+bare `list` precisely so the generation schemas do not import the retrieval ones.
 
 ## The estimation flows — do not confuse them
 
@@ -96,6 +120,7 @@ src/master_ai_engineering_lidr/__init__.py  uv_build package stub; its console s
 | Typed v1 | `POST /api/v1/new-estimate` | `render_estimation_prompt(request, version="v1")` → `app/prompts/estimation/v1/*.j2` | `LLMWrapper.complete()` (LiteLLM Router, fallback, cache) |
 | Conversational | `POST /sessions/{id}/estimate` | `render_conversational_prompt(...)` → `app/prompts/estimation/v3/*.j2`; metadata via `app/sessions/heuristics.py` (LLM `metadata_extraction/v1/` only as fallback) | `LLMWrapper.complete_structured_chat()` (Instructor, no cache) |
 | Conversational ACB | `POST /sessions/{id}/estimate-acb` | the same v3 prompt, re-rendered with `<critic_feedback>` on each Boss iteration | `LLMWrapper.complete_structured_chat()` for both actor and critic (`app/services/boss.py`) |
+| Grounded estimate | `POST /v1/estimate/from-transcript` | `rag_reformulation/v1/*.j2` (transcript → query), then `rag_grounded_estimation/v1/*.j2` (query + `<sources>` → estimate) | `LLMWrapper.complete_structured()` twice — reformulate, generate — and a third time only when the citation retry fires; no cache |
 
 The typed and conversational flows use prompt **versioning**; the version is a
 string at the call site (`PROMPT_VERSION = "v1"` in `app/routers/estimations.py`,
@@ -105,6 +130,15 @@ templates is a string change, not a refactor (add `v3/` beside `v2/`).
 `docker-compose.yml` runs `streamlit_app_loader.py`, a two-tab client: **Typed
 estimation** (`/new-estimate`) and **Conversational session** (`/sessions`). The
 other two clients are run by hand.
+
+**Retrieval is no longer a dead end.** The grounded-estimate flow consumes it:
+`orchestrator.estimate_from_transcript` calls `retrieval.pipeline.retrieve` and
+turns the chunks into an estimate, which is what the `POST /v1/estimate/*` routes
+mount. `/v1/retrieval/search` is still its own endpoint and still returns evidence
+without a conclusion. The four configurations (vector/hybrid × rerank on/off) are
+measured in `session10_report.md` and, on this 60-chunk corpus, hybrid and
+reranking showed no precision gain (see gotchas 73–80 before changing anything in
+`app/generation/rag/retrieval/`).
 
 ## Endpoints
 
@@ -118,7 +152,12 @@ other two clients are run by hand.
 - `GET /sessions/{session_id}` — session metadata + history length + `anchors_count`, `summary_chars`, `last_resolved_tier`, `last_tier_rule`, and the memory itself (`summary` text + `anchor_texts`)
 - `POST /embeddings/ingest` — one document per request: `{source_path, document_type, content: <Budget>, pseudonymize?: bool}` → `{document_id, chunks_created, embedding_dimension, ingestion_time_ms, entities_pseudonymized}`. `pseudonymize` (default `false`, strict boolean) rewrites each chunk's text through the PII pseudonymizer before embedding; `503` if it is set and no pseudonymizer is wired. Persists the document and its chunks in one transaction. Duplicate `source_path` → **409** with a top-level `{"detail": "Document already ingested", "document_id": N}`. 422 on validation, 500 generic when there is no OpenAI key, `DATABASE_URL` is not Postgres, or `EMBEDDING_MODEL` is not the 1536-dim model. **Prefix**: `/embeddings`, not `/api/v1`
 - `POST /embeddings/compare` — `{budgets, queries, strategies, top_k}` → `{stats_per_strategy, queries_per_strategy}`. Runs the eight chunkers over the same corpus and returns token stats plus top-k cosine per query. **Persists nothing.** 400 unknown strategy, 500 when a strategy's provider key is missing, 422 on the body. The three paid strategies (`semantic`, `propositional`, `contextual_retrieval`) bill during *ingestion*
-- `POST /search` — `{query, k}` (query 1–20,000 chars, k 1–50, default 5) → `{query, k, search_time_ms, results[{chunk_id, document_id, chunk_type, content, distance, metadata}]}`. k-NN by cosine distance in SQL through the HNSW index (`ix_chunks_embedding_hnsw`, `vector_cosine_ops`); `hnsw.ef_search` is set to 40 per transaction. Empty corpus → 200 with `results: []`; 422 on bounds; 500 generic on failure. **Prefix**: unversioned, like `/embeddings`
+- `POST /v1/retrieval/search` — `{query 1–20,000, top_k 1–50 (10), recall_k 1–200 (50), search_mode "vector"|"hybrid", rerank bool, rrf_k 1–200, distance_threshold 0–2}` → `{chunks[{chunk_id, document_id, budget_id, component_id, chunk_type, content, sector, project_year, distance, rank, source}], search_mode, rerank, candidates_evaluated, search_time_ms, low_confidence}`. The four configurations are vector/hybrid × rerank on/off; defaults come from `RETRIEVAL_SEARCH_MODE`/`RERANKER_ENABLED`. `distance` is **null** for lexical-only hits (`source: "lexical"`), never a sentinel. **502** `"Reranking service is unavailable. Please retry later."` when a requested rerank fails — fail-closed, never a silent fallback to recall order. 500 when the embedder/store is unwired, 422 on bounds. No auth. **Prefix**: unversioned retrieval surface; `/search` was retired here in Session 10
+- `POST /v1/estimate/from-transcript` — `{transcript 100–50,000, idempotency_key? (≤128), top_k 1–50 (default 5), rerank bool|null, search_mode "vector"|"hybrid"|null}` → `{estimate, query, chunks, retrieved, cached, validation_retries (0 or 1), pipeline_ms}`. Chain: idempotency lookup → reformulate → retrieve (with `RETRIEVAL_DISTANCE_THRESHOLD`) → assemble → generate → `check_citations` (one corrective retry) → store. **502** for `ReformulationError`, `GenerationError` and `CitationValidationError`, each with its own `public_message`; **422** for `ContextAssemblyError`; **500** generic with no exception text — including an unwired embedder or store, because `RetrievalUnavailable` is not a `ChainError`. Nothing above the distance floor → **200** with `grounded=false`, `citations=[]`, `confidence_pct=0` and no generation call. A keyed replay → **200** with `cached=true` and the stored `pipeline_ms`. No auth
+- `POST /v1/estimate/stages/reformulate` — `{transcript}` → `{stage, latency_ms, query}`; **502** only for a transcript that is blank after cleaning
+- `POST /v1/estimate/stages/retrieve` — exactly one of `{query 1–20,000}` or `{estimation_query}`, plus `top_k 1–50`, `search_mode`, `rerank`, `rrf_k 1–1,000`, `distance_threshold 0–2` → `{stage, latency_ms, result, chunks}`; **502** when a requested rerank fails, **500** when retrieval is unwired
+- `POST /v1/estimate/stages/assemble` — `{chunks[≥1], max_tokens (default 3,000)}` → `{stage, latency_ms, context, sources}`; **422** `ContextAssemblyError`
+- `POST /v1/estimate/stages/generate` — `{query, context (≤200,000), source_ids[], model_override}` → `{stage, latency_ms, estimate}`; **502** on a provider failure. Deliberately does **not** validate citations
 - `POST /api/v1/ingestion/runs` — `{source_name}` → **202** `{job_id, source_name, status}`; unknown source → 404, `review`/`exclude` source → 400
 - `GET /api/v1/ingestion/jobs/{job_id}` — job status, document count, error, timestamps; 404 if unknown
 - `GET /health`, `GET /docs`, `GET /redoc`
@@ -181,6 +220,10 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
   Boss runs, the session gets exactly one user/assistant turn (see
   `tests/test_sessions_acb.py`).
 - Write a spec in `specs/` for anything larger than a bug fix; see `specs/README.md`.
+- **A change is not done until its documentation is.** Walk `rules/closeout.md`
+  before the last commit: `README.md`, `AGENTS.md` (Layout, Endpoints, flow table,
+  gotchas), `docs/`, `rules/`, the folder indexes and the spec's status. A deleted
+  route, module or constant must vanish from every document in the same change.
 
 ## Gotchas that have already bitten
 
@@ -431,9 +474,9 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     friendly 409; the unique index is the guarantee under concurrency. An
     `IntegrityError` is re-read in a fresh session and mapped to the same 409.
 52. **`vector(1536)` is hard-coded.** `EMBEDDING_DIMENSIONS` is the single source
-    of truth, and `/embeddings/ingest` + `/search` are disabled (generic 500) when
-    `EMBEDDING_MODEL` is not `text-embedding-3-small`. A mismatched provider
-    response is refused before the write.
+    of truth, and `/embeddings/ingest` + `/v1/retrieval/search` are disabled
+    (generic 500) when `EMBEDDING_MODEL` is not `text-embedding-3-small`. A
+    mismatched provider response is refused before the write.
 53. **The vector index is HNSW, and the operator class is load-bearing.**
     `ix_chunks_embedding_hnsw` uses `vector_cosine_ops` (m = 16,
     ef_construction = 128) to match the `<=>` in `ChunkStore.search`. Any other
@@ -447,8 +490,11 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     `DATABASE_URL`; handing the `+psycopg` URL to `create_async_engine` fails.
     Both engines are lazy and cached per URL — importing
     `app.persistence.database` opens nothing.
-55. **`/search` is unversioned, like `/embeddings/ingest`.** The Session-8 brief
-    mandates the path. Do not move either under `/api/v1`.
+55. **`/search` no longer exists; its replacement is versioned.** The Session-8
+    brief mandated the unversioned path, and Session 10 retired it: `POST
+    /v1/retrieval/search` is the only retrieval route. `/embeddings/ingest` stays
+    unversioned for the same Session-7/8 mandate — do not move it under
+    `/api/v1`, and do not resurrect `/search` as a second path.
 56. **`metadata_` is the Python attribute; the column is `"metadata"`.** SQLAlchemy
     reserves `metadata` on declarative models.
 57. **The default test suite never reaches Postgres.** The RAG integration tests
@@ -523,3 +569,85 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     threshold, parent-hour rollup, grounded generation and citation validation
     are the next sessions' specs, not maintenance. In particular,
     `documents.metadata` still does not persist `total_estimated_hours`.
+
+73. **The full-text config must match the generated column, and it is not a
+    setting.** `FTS_REGCONFIG = "english"` lives in
+    `app/embedding_pipeline/store/repository.py` and the same literal is frozen in
+    migration `0004_rag_fts`. If they diverge, Postgres still returns rows � with
+    the GIN index unused and the matching silently wrong. Making it a `Settings`
+    field was tried and rejected for exactly this reason: an `.env` value could
+    drift from a stored column. `tests/test_fts_regconfig.py` parses the migration
+    and compares all three homes.
+74. **The reranker must never be imported by a hermetic test.** `sentence_transformers`
+    (and torch) are imported *inside* `CrossEncoderReranker._ensure_loaded`, under a
+    lock, on first use. Importing the module is free; a test that imports torch
+    would add seconds and a 120 MB download to the suite. Two tests enforce it,
+    including a subprocess check on `sys.modules`. Inject a fake reranker into
+    `retrieve(..., reranker=...)` instead.
+75. **`RetrievedChunk.distance` is `None` for lexical-only hits � never a sentinel.**
+    The reference implementation used `1.0` as a "no distance" marker, which made two
+    different meanings share one field. Ours keeps them apart: `distance is None` plus
+    `source == "lexical"`. Do not "normalise" it to a float; code that sorts on
+    distance must handle `None`.
+76. **A failed rerank is a 502, never a fallback.** When `rerank=true` and the
+    cross-encoder cannot load or score, the route returns
+    `502 {"detail": "Reranking service is unavailable. Please retry later."}`. Falling
+    back to recall order with a 200 was considered and rejected: the caller asked for
+    a configuration, and returning an un-reranked list would report a configuration
+    that never ran � a false positive the evaluation harness would record as config C
+    or D. `rerank=false` paths are unaffected by a broken reranker; a test asserts
+    that.
+77. **The Postgres test fixtures delete only rows they own.** Both
+    `tests/test_retrieval_postgres.py` and `tests/test_rag_postgres.py` used to
+    `DELETE FROM chunks` on setup and teardown. `TEST_DATABASE_URL` is commonly
+    pointed at the compose database, so running `-m postgres` silently wiped the
+    ingested corpus � observed once during Session 10 and re-ingested. Cleanup is now
+    scoped by `source_path` prefix (`s10::lexical::`). Any new destructive fixture
+    must do the same.
+78. **RAG is two packages and the import edge is one-way.** The corpus half
+    (`app/embedding_pipeline/`) never imports the query half
+    (`app/generation/rag/retrieval/`); the query half imports `ChunkStore` and
+    `OpenAIEmbedder` from the corpus half. `app/generation/rag/retrieval/README.md`
+    documents the boundary and `tests/test_retrieval_maintainability.py` enforces the
+    direction. A cycle here means the split was abandoned by accident.
+79. **`mutmut` does not run on native Windows** (`use the WSL`, upstream issue #397),
+    and inside the Linux API container its pytest harness fails with
+    `BadTestExecutionCommandsException` while the same suite passes there. The
+    Session-10 mutation gate (`scripts/mutation_s10.ps1`, `[tool.mutmut]` in
+    `pyproject.toml`) is therefore unrun on this machine. No mutation score is
+    claimed anywhere. Run it in WSL or CI.
+80. **`scripts/eval_retrieval_s10.py` must use one event loop for the whole run.**
+    Calling `asyncio.run` once per configuration reuses a cached async engine whose
+    pooled connections belong to the previous loop, and fails with
+    `'NoneType' object has no attribute 'send'` (gotcha 57's cause). `run_all()`
+    wraps every configuration in a single `asyncio.run`.
+
+81. **`grounded=false` means the model was never called — it is not a failure.**
+    When no retrieved chunk is close enough (`RETRIEVAL_DISTANCE_THRESHOLD`, 0.65, an
+    upper bound on cosine distance), `orchestrator` returns
+    `estimator.unavailable_estimate()` before assembling or generating: no
+    modules, no hours, `citations=[]`, `confidence_pct=0`, `validation_retries=0`.
+    The response is a 200. Retrying the same transcript changes nothing; the fix is
+    a corpus or query problem, not a retry. Gotcha 82 says where to look.
+82. **The distance floor lives in the chain, not in `/v1/retrieval/search`.**
+    `Settings.RETRIEVAL_DISTANCE_THRESHOLD` (default 0.65) is passed by
+    `orchestrator._ground` only. The retrieval route filters on it solely when the
+    request supplies `distance_threshold`, so the same query legitimately returns
+    chunks there and `grounded=false` here. Do not "fix" the route to apply the
+    setting: its callers ask for the nearest chunks, even poor ones. Calibration:
+    relevant queries 0.43–0.60, an unrelated topic 0.71–0.72.
+83. **The estimate idempotency store is in-process and dies on restart.**
+    `app/generation/rag/idempotency.py` is a 256-entry FIFO `OrderedDict` behind a
+    lock, keyed by `sha256(idempotency_key + "\x00" + transcript)`. A restart
+    forgets every entry, and `uvicorn --workers N` gives each worker its own store,
+    so a replay can miss by landing elsewhere. Redis is the production answer. A
+    replay reports the **stored** `pipeline_ms`, not the cache's response time.
+84. **Citations are validated against `sources_of(context)`, not against the
+    retrieved set.** A chunk truncated out of the prompt for the 3,000-token budget
+    was retrieved but cannot be cited; `validation.check_citations` rejects it, and
+    after one corrective retry the request is a 502
+    `CitationValidationError`. If you add a chunk to the prompt without adding it
+    to `sources_of`, every honest citation to it fails; if you add it to
+    `sources_of` without putting it in the prompt, you have reopened the hole the
+    check exists to close. `assemble` and `sources_of` share one inclusion
+    decision — keep it that way.

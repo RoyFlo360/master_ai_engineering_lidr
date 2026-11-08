@@ -1,6 +1,6 @@
 # 014 — Session 9: architectural diagnostic and the search query bound
 
-- **Status:** Implemented
+- **Status:** Implemented (its retrieval surface is superseded by spec 016)
 - **Date:** 2026-10-31
 - **Scope:** `app/embedding_pipeline/schemas.py` (`MAX_QUERY_CHARS`),
   `tests/test_embedding_schemas.py`, `tests/test_search_endpoint.py`,
@@ -8,6 +8,12 @@
   `arquitectura-actual.md` (new), `docs/data-model.md`, `rules/security.md`,
   `AGENTS.md`, `README.md`
 - **Supersedes / Superseded by:** — (extends spec 012 without changing its design)
+
+> **Superseded for the retrieval surface by [spec
+> 016](016-session-10-hybrid-and-rerank.md).** `POST /search` was retired in
+> Session 10; the 20,000-character query bound it introduced survives on
+> `/v1/retrieval/search`. The trace client and `scripts/query_examples.py` now
+> call the new route.
 
 ## Problem
 

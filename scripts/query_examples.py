@@ -2,9 +2,14 @@
 """Semantic-search smoke test against the persisted corpus (Session 8).
 
 Exercises the real retrieval path — HTTP against ``POST /embeddings/ingest`` and
-``POST /search`` — with five queries that probe the corpus from different angles
-(direct match, semantic reformulation, out-of-domain, ambiguous, highly
-specific).
+``POST /v1/retrieval/search`` — with five queries that probe the corpus from
+different angles (direct match, semantic reformulation, out-of-domain, ambiguous,
+highly specific).
+
+The retrieval route is the Session-10 one (spec 016); the Session-8 ``POST
+/search`` it used to call was retired. The body key is ``top_k`` and the hits
+arrive under ``chunks``, each carrying ``budget_id``/``chunk_type``/``sector``
+directly — there is no nested ``metadata`` object any more.
 
 Idempotent: it first ingests ``data/budgets_sample.json`` (one document per
 budget); documents already persisted answer 409 and are skipped, so re-running
@@ -111,9 +116,21 @@ def ingest_corpus(client: httpx.Client, base_url: str) -> None:
     print(f"Corpus: {len(budgets)} budgets — {created} ingested, {skipped} already present.")
 
 
+def format_distance(distance: float | None) -> str:
+    """Render a hit's distance, or ``n/a`` when the hit has none.
+
+    A lexical-only chunk carries ``distance: null`` in the Session-10 contract —
+    no sentinel value — so the smoke test must be able to print it when the
+    deployment defaults to ``RETRIEVAL_SEARCH_MODE=hybrid``.
+    """
+    return "n/a" if distance is None else f"{distance:.4f}"
+
+
 def run_queries(client: httpx.Client, base_url: str) -> None:
     for index, (label, query) in enumerate(QUERIES, start=1):
-        response = client.post(f"{base_url}/search", json={"query": query, "k": TOP_K})
+        response = client.post(
+            f"{base_url}/v1/retrieval/search", json={"query": query, "top_k": TOP_K}
+        )
         response.raise_for_status()
         body = response.json()
 
@@ -122,10 +139,10 @@ def run_queries(client: httpx.Client, base_url: str) -> None:
         print(f'    query: "{query}"')
         print(f"    search_time_ms: {body['search_time_ms']}")
         print(f"    {'chunk_id':>8}  {'distance':>8}  {'chunk_type':<18}  content")
-        for hit in body["results"]:
+        for hit in body["chunks"]:
             preview = " ".join(hit["content"].split())[:CONTENT_PREVIEW_CHARS]
             print(
-                f"    {hit['chunk_id']:>8}  {hit['distance']:>8.4f}  "
+                f"    {hit['chunk_id']:>8}  {format_distance(hit['distance']):>8}  "
                 f"{hit['chunk_type']:<18}  {preview}"
             )
 

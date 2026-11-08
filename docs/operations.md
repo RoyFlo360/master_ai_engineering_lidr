@@ -33,14 +33,14 @@ uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost
 ```
 
 The suite is hermetic: it reads no `.env`, reaches no provider, and needs no Redis or
-database. Measured today: **664 passed, 18 skipped** — the skips are the opt-in
-Postgres modules (10 ingestion, 8 vector store).
+database. Measured today: **813 passed, 24 skipped** — the skips are the opt-in
+Postgres modules (the `postgres` marker).
 
 To replay the persistence tests against a real database:
 
 ```shell
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
-uv run pytest -q                               # 682 passed, 0 skipped
+uv run pytest -q -m postgres                   # 24 passed against the live database
 ```
 
 ### Docker
@@ -63,8 +63,26 @@ bind-mounted at `/srv/app`; `uvicorn` reloads changes under `app/`, and Streamli
 reruns on save. `pyproject.toml`, `uv.lock` and `Dockerfile` changes require
 `--build`.
 
+`alembic upgrade head` applies the Session-10 FTS migration `0004_rag_fts` on
+Postgres: it adds `chunks.content_tsv` (generated, stored) and its GIN index
+`ix_chunks_content_tsv`, and leaves the HNSW index alone. On SQLite the migration
+returns early.
+
 The image contains `scripts/`, `data/`, `alembic/` and `alembic.ini`, so
 `docker compose exec api python scripts/compare.py …` works without the bind mount.
+
+### Reranker gate (Session 10)
+
+```shell
+docker compose exec api python -m app.generation.rag.retrieval.verify_reranker
+```
+
+Exit `0` means the cross-encoder loaded and ranked the on-topic document above the
+irrelevant one. Exit `1` means the model could not load or score; exit `2` means it
+loaded but produced the wrong ranking. Any non-zero exit means `rerank=true` will
+return `502`. The weights (~120 MB) are cached in the `hf_cache` named volume
+mounted at `/root/.cache/huggingface` (`HF_HOME`), so recreating the container does
+not force a re-download.
 
 ### Evaluate and stress (real provider calls)
 
@@ -75,7 +93,12 @@ uv run python -m evals.run --mode actor --http http://localhost:8000
 uv run python -m evals.stress.fixtures.build_pdfs       # once: 5/20/50/100 KB PDFs
 uv run python -m evals.stress.run --http http://localhost:8000
 uv run python evals/stress/analyze.py                   # regenerate REPORT.md tables
+uv run python scripts/eval_retrieval_s10.py             # four retrieval configurations
+uv run python scripts/eval_retrieval_s10.py --dry-run   # no network, no database
 ```
+
+The retrieval eval needs a live Postgres with the corpus ingested and
+`OPENAI_API_KEY`; `--dry-run` prints the configurations and the golden set only.
 
 `evals/run.py` reads 16 cases from `evals/golden_dataset.json`, prints a per-case table
 and exits non-zero on a failing case. `evals/stress/run.py` walks the `growing`,
@@ -130,6 +153,13 @@ Read by `app/config.py` (`Settings`), from the environment or the root `.env`.
 | `SEMANTIC_CACHE_THRESHOLD` | `0.92` | Cosine similarity required for a semantic hit |
 | `SEMANTIC_CACHE_TTL` | `86400` | Semantic index entry TTL, seconds |
 | `SEMANTIC_CACHE_LOG_ONLY` | `false` | Score and log lookups without ever returning a hit |
+| `RETRIEVAL_SEARCH_MODE` | `vector` | Default mode for `POST /v1/retrieval/search`: `vector` or `hybrid` |
+| `RERANKER_ENABLED` | `false` | Default for the request's `rerank`; `true` loads the cross-encoder on the first reranked request |
+| `RRF_K` | `60` | Reciprocal-rank-fusion smoothing constant (1..1,000) |
+| `RETRIEVAL_RECALL_TOP_K` | `50` | Candidates fetched per branch before fusion or reranking (1..200) |
+| `RERANK_TOP_N` | `5` | Survivors the cross-encoder keeps (1..50) |
+| `RERANKER_MODEL` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | Cross-encoder id; ~120 MB download on first use, cached under `HF_HOME` |
+| `RETRIEVAL_DISTANCE_THRESHOLD` | `0.65` | Cosine-distance floor (0..2) that `POST /v1/estimate/from-transcript` passes to retrieval; nothing above it counts as evidence. `/v1/retrieval/search` applies a floor only when the request supplies one |
 
 Not part of `Settings`:
 
@@ -158,6 +188,9 @@ conversational flows are provider-agnostic through LiteLLM.
 | Streamlit page cannot start in the container | The image copies only the two older clients; the loader arrives through the bind mount | Run compose with the bind mount, or add the file to the image |
 | `.env` missing | `Settings` raises at startup | Copy `.env.example` to `.env` and set a key |
 | Streaming returns an `error` frame | Provider failure after the stream started | The HTTP status is already 200; read the frame and the `estimate_stream_failed` log |
+| `rerank=true` returns 502 | The cross-encoder did not load: no weights, no network, or a broken `torch` install | Run `docker compose exec api python -m app.generation.rag.retrieval.verify_reranker`; first use downloads ~120 MB into `HF_HOME`/`hf_cache`. `rerank=false` keeps working |
+| An estimate comes back `grounded=false` | No retrieved chunk was close enough — cosine distance ≤ `RETRIEVAL_DISTANCE_THRESHOLD` (0.65) is required — so the chain skipped generation instead of answering from memory | Check the corpus is ingested (`select count(*) from chunks`), confirm the reformulated `search_query` is English — the corpus is English and a Spanish query matches poorly — and inspect the query with `POST /v1/estimate/stages/reformulate` |
+| A replayed estimate is regenerated after a restart | The idempotency store is process-local (256 entries, FIFO) | Expected; Redis is the production answer. With `--workers N` a replay may also miss by landing on another worker |
 
 ## Manual verification runbook (Session 7)
 
@@ -182,9 +215,10 @@ container that never becomes healthy rather than a 500 on the first request.
 curl.exe -s http://localhost:8000/openapi.json | findstr "/embeddings/ingest"
 ```
 
-Or open <http://localhost:8000/docs>, confirm the **embeddings** and **search**
-tags, and use **Try it out** with one budget from `data/budgets_sample.json`
-(the file is a bare array; take one element as `content`).
+Or open <http://localhost:8000/docs>, confirm the **embeddings** and
+**retrieval** tags, and use **Try it out** with one budget from
+`data/budgets_sample.json` (the file is a bare array; take one element as
+`content`).
 
 ### 2. Ingest one document (writes to Postgres)
 
@@ -227,8 +261,9 @@ The real output is recorded in [`output_examples.txt`](../output_examples.txt).
 ### Tracing a transcript through retrieval (Session 9)
 
 `examples/trace_s09.py` embeds a whole meeting transcript and sends it to
-`/search`, printing the vector statistics and the raw response. It is a client
-only: no reformulation, no threshold, no reranking.
+`/v1/retrieval/search`, printing the vector statistics and the raw response. It
+is a client only: no reformulation, no threshold, no reranking — it uses the
+default `vector` mode with `rerank=false` and `top_k=5`.
 
 ```shell
 uv run --env-file .env python examples/trace_s09.py examples/transcripts/02_ambiguous.txt --k 5
@@ -276,13 +311,46 @@ produces different search distances than ingesting it without.
 ### 3. Search the corpus
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://localhost:8000/search `
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/v1/retrieval/search `
   -ContentType 'application/json' `
-  -Body '{"query":"REST API with OAuth authentication","k":5}'
+  -Body '{"query":"REST API with OAuth authentication","top_k":5}'
 ```
 
-Expected: `results` ordered by ascending `distance` (cosine distance, lower is
-closer). An empty corpus is a `200` with `results: []`, not an error.
+Expected: `chunks` ordered by ascending `distance` (cosine distance, lower is
+closer) with `source: "vector"`, plus `search_mode`, `rerank`,
+`candidates_evaluated`, `search_time_ms` and `low_confidence`. An empty corpus is
+a `200` with `chunks: []` and `low_confidence: true`, not an error. Add
+`"search_mode":"hybrid"` to query the lexical branch too, or `"rerank":true` to
+run the cross-encoder (gate it first — see above).
+
+### 3b. Estimate from a transcript (Session 10)
+
+The chain needs the corpus ingested and `OPENAI_API_KEY` set. One call does the
+whole thing:
+
+```powershell
+$body = @{ transcript = (Get-Content examples/transcripts/01_clear.txt -Raw) } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/v1/estimate/from-transcript `
+  -ContentType 'application/json' -Body $body
+```
+
+Expected: `retrieved` > 0, `estimate.grounded: true`, every
+`estimate.citations[].chunk_id` present in the `chunks` array, and
+`validation_retries` 0 (1 when the first estimate cited an id it was not shown).
+Add `"idempotency_key":"probe-1"` and send it twice: the second response has
+`cached: true` and the **same** `pipeline_ms` as the first.
+
+When the answer is `grounded: false`, look at `query.search_query` first — it must
+be an English string, because a Spanish query does not match the English corpus.
+The steps are also callable alone:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/v1/estimate/stages/reformulate `
+  -ContentType 'application/json' -Body $body
+```
+
+That returns the `EstimationQuery` with `source` (`llm` or `fallback`) and
+`confidence`, which is enough to tell a retrieval miss from a reformulation miss.
 
 ### 4. Embeddings failure modes
 
@@ -295,9 +363,9 @@ curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:8000/embeddings/
 curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:8000/embeddings/ingest `
   -H "Content-Type: application/json" -d '{"source_path":"x","document_type":"d","content":{},"extra":1}'
 
-# 422 — k out of bounds on search
-curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:8000/search `
-  -H "Content-Type: application/json" -d '{"query":"x","k":99}'
+# 422 — top_k out of bounds on retrieval
+curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:8000/v1/retrieval/search `
+  -H "Content-Type: application/json" -d '{"query":"x","top_k":99}'
 ```
 
 To see the **500 without an OpenAI key**, start a throwaway second API with the
@@ -315,7 +383,8 @@ The same generic 500 appears when `DATABASE_URL` is not Postgres (the host
 default is SQLite) or when `EMBEDDING_MODEL` is not the 1536-dim model. The log
 carries the reason (`database_not_postgres`,
 `embedding_model_dimension_mismatch`, `embedder_unavailable`); the response never
-does.
+does. `POST /v1/retrieval/search` answers the same `500 "Embedding service is
+not available."` under the same three conditions.
 
 ### 5. Chunking comparison
 
@@ -381,10 +450,10 @@ uv run pytest tests/test_embedding_schemas.py tests/test_embedding_chunker.py `
   tests/test_embedding_performance.py tests/test_embedding_security.py `
   tests/test_compare_cli.py -q            # 90 passed
 
-uv run pytest -q                          # 664 passed, 18 skipped
+uv run pytest -q                          # 813 passed, 24 skipped
 
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
-uv run pytest -q                          # 682 passed, 0 skipped
+uv run pytest -q -m postgres              # 24 passed
 ```
 
 ## Where the artifacts are
@@ -393,6 +462,8 @@ uv run pytest -q                          # 682 passed, 0 skipped
 | --- | --- | --- |
 | Structured logs | stdout / `docker compose logs -f api` | JSON when `APP_ENV=production`, console otherwise |
 | Golden set | `evals/golden_dataset.json` | 16 cases |
+| Retrieval golden set | `evals/golden_retrieval.json` | 5 queries with their relevant budget ids |
+| Retrieval eval results | optional `--json` path (written under `var/` in this repository) | Four configurations, precision@k and latency |
 | Eval summary | optional `--output` path | JSON written by `evals/run.py` |
 | Stress results | `evals/stress/results.csv` | Gitignored, 22 columns |
 | Stress report | `evals/stress/REPORT.md` | Regenerated by the analyzer |

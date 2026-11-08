@@ -1,8 +1,9 @@
 # Data flows
 
-Five flows share one process and overlap in the prompt material. Confusing them is
-the most common source of wrong assumptions about caching and cost, so each section
-below names its entry point, steps, state, cost semantics and failure modes.
+The flows in this file share one process, and the six estimation flows overlap in
+the prompt material. Confusing them is the most common source of wrong assumptions
+about caching and cost, so each section below names its entry point, steps, state,
+cost semantics and failure modes.
 
 | Flow | Endpoint | Prompt source | Caching | Ledger | Provider path |
 | --- | --- | --- | --- | --- | --- |
@@ -11,6 +12,8 @@ below names its entry point, steps, state, cost semantics and failure modes.
 | Typed | `POST /api/v1/new-estimate` | `estimation/v1/*.j2` | exact-match Redis | yes | LiteLLM Router |
 | Conversational | `POST /sessions/{id}/estimate` | `estimation/v3/*.j2` | none | no | Instructor + LiteLLM, primary model |
 | Actor-Critic-Boss | `POST /sessions/{id}/estimate-acb` | `estimation/v3/*.j2` + critic feedback | none | no | Instructor + LiteLLM, actor and critic |
+| Retrieval | `POST /v1/retrieval/search` | none | none | no | OpenAI embeddings + Postgres (vector and full-text) |
+| Grounded estimate | `POST /v1/estimate/from-transcript` | `rag_reformulation/v1/*.j2`, `rag_grounded_estimation/v1/*.j2` | in-process idempotency store | no | Instructor + LiteLLM, auxiliary model then primary |
 
 ## 1. Legacy transcription — `POST /api/v1/estimate`
 
@@ -276,27 +279,14 @@ non-1536 `EMBEDDING_MODEL`; 500 `"Failed to generate embeddings."` for a provide
 or database failure; 503 `"Pseudonymization is not available."` when the flag is
 set and the deployment has no pseudonymizer. Details go to the log only.
 
-## 7. Semantic search — `POST /search`
+## 7. Semantic search — `POST /search` retired in Session 10
 
-**Entry.** `app/embedding_pipeline/search_router.py::search`, body
-`SearchRequest{query, k}` with `k` in `1..50` (default 5).
+The Session-8 vector-only route was removed from the application in Session 10:
+`/search` returns `404` and is absent from the OpenAPI document. Its replacement
+is `POST /v1/retrieval/search` (flow 10). The vector mechanics the old route
+introduced are still the first stage of that pipeline:
 
-**Steps.**
-
-```text
-request
-  -> Pydantic validation       422 when k is out of bounds or the query is empty
-  -> OpenAIEmbedder.embed_one  in a thread; same model used at ingest time
-  -> ChunkStore.search         SET LOCAL hnsw.ef_search = 40
-                               SELECT ... embedding <=> :query AS distance
-                               ORDER BY distance LIMIT k   (HNSW scan when
-                               the planner prefers it; seq scan otherwise)
-  -> 200 {query, k, search_time_ms, results[]}
-```
-
-**State touched.** Read-only. An empty corpus is a `200` with `results: []`.
-
-**Why cosine.** OpenAI embeddings are normalized, so L2 and inner product would
+**Cosine.** OpenAI embeddings are normalized, so L2 and inner product would
 rank identically. Cosine is chosen to match the `vector_cosine_ops` operator
 class of `ix_chunks_embedding_hnsw` — an operator/index mismatch makes Postgres
 ignore the index silently.
@@ -307,9 +297,9 @@ transaction so pooled connections do not inherit it. At the sample corpus size
 the planner still chooses a sequential scan; the index is used once the table is
 large enough to justify the graph walk.
 
-**Deliberately absent.** No metadata filters, no hybrid search, no reranking, and
-no integration into `EstimationService.estimate()`. The index is the only
-retrieval change in this phase.
+**Deliberately absent.** No metadata filters on `/v1/retrieval/search` — the
+Session-10 brief forbids them. `EstimationService` still does not consult the
+corpus.
 
 ## 8. Chunking comparison — `POST /embeddings/compare`
 
@@ -379,19 +369,150 @@ drops `BUDGET-2024-0004` (negative amount) and holds `BUDGET-2024-0003`
 malformed body. A background failure marks the row `failed` with a truncated
 message — the client already has its 202 and cannot see it there.
 
+## 10. Retrieval — `POST /v1/retrieval/search`
+
+**Entry.** `app/generation/rag/retrieval/router.py::retrieval_search`, body
+`RetrievalRequest{query, top_k, recall_k, search_mode, rerank, rrf_k,
+distance_threshold}`. No auth, consistent with every other endpoint.
+
+**Steps.**
+
+```text
+request
+  -> Pydantic validation         422 on any bound or an unknown field
+  -> resolve defaults            search_mode <- RETRIEVAL_SEARCH_MODE
+                                 rerank      <- RERANKER_ENABLED
+                                 rrf_k       <- RRF_K
+                                 recall_k    <- RETRIEVAL_RECALL_TOP_K when omitted
+  -> embed the query once        OpenAIEmbedder.embed_one, in a thread
+  -> vector branch               ChunkStore.search(k = recall_k when hybrid or
+                                 rerank, else top_k; distance_threshold optional)
+  -> hybrid? lexical branch      ChunkStore.search_lexical(plainto_tsquery(FTS_REGCONFIG),
+                                 ranked by ts_rank_cd) through the GIN index
+  -> hybrid? fuse                reciprocal_rank_fusion([vector ids, lexical ids], k=rrf_k)
+  -> rerank?                     CrossEncoderReranker.rerank(query, candidates,
+                                 top_n=RERANK_TOP_N); any load/score failure -> 502
+  -> chunks[:top_k]
+  -> 200 RetrievalResult{chunks, search_mode, rerank, candidates_evaluated,
+                         search_time_ms, low_confidence}
+```
+
+**State touched.** Read-only. One embedding call and the branch queries (the
+vector branch also sets `hnsw.ef_search` per transaction), plus — when reranking
+is requested — the cross-encoder model loaded into process memory (weights cached
+under `HF_HOME`; the compose volume is `hf_cache`). No cache entry, no ledger row.
+
+**Failure modes.** 422 on the body bounds; 502
+`"Reranking service is unavailable. Please retry later."` when `rerank=true` and
+the cross-encoder cannot load or score (fail-closed: recall order is never
+returned as reranked output); 500 `"Embedding service is not available."` when
+the embedder or store is unwired; 500 `"Failed to run retrieval."` for any other
+embedding or SQL failure. The cause goes to the log as `retrieval_failed`; the
+response body is fixed. `low_confidence` is `true` only when zero chunks
+survived — it is not a score threshold.
+
+**Cost and latency.** One embedding call per request; no provider call for
+reranking. The cross-encoder is CPU-only and runs one forward pass per recalled
+candidate, so `rerank=true` costs seconds rather than milliseconds (about 9.4 s
+per query for 50 candidates on the machine where this was measured).
+
+## 11. Grounded estimate — `POST /v1/estimate/from-transcript`
+
+**Entry.** `app/generation/rag/estimate_router.py::estimate_route`, body
+`EstimateFromTranscriptRequest{transcript (100–50,000 characters),
+idempotency_key (≤128, optional), top_k (1–50, default 5), rerank (bool | null),
+search_mode ("vector" | "hybrid" | null)}`. Unknown fields are a 422
+(`extra="forbid"`). No auth, consistent with every other endpoint.
+
+**Steps.**
+
+```text
+request
+  -> idempotency lookup                     only when idempotency_key is set
+       key = sha256(idempotency_key + "\x00" + transcript)
+       hit -> 200 stored body with cached=true and its original pipeline_ms
+  -> reformulate   query_reformulator.reformulate(transcript)
+       EstimationQuery{summary, search_query, sector?, technologies,
+                       project_year?, confidence, source}
+       any LLM failure -> source="fallback", confidence <= 0.3,
+                          truncated transcript as the search string
+       transcript empty after cleaning -> ReformulationError -> 502
+  -> retrieve      pipeline.retrieve(query.search_query, top_k,
+                       recall_k=RETRIEVAL_RECALL_TOP_K,
+                       search_mode=request|RETRIEVAL_SEARCH_MODE,
+                       rerank=request|RERANKER_ENABLED, rrf_k=RRF_K,
+                       rerank_top_n=RERANK_TOP_N,
+                       distance_threshold=RETRIEVAL_DISTANCE_THRESHOLD)
+       zero chunks -> SHORT CIRCUIT (see below) -> 200, grounded=false
+  -> assemble      context_assembler.assemble(chunks) + sources_of(chunks)
+       <source id=… budget=… sector=… year=…> blocks, whole chunks, rank order,
+       MAX_CONTEXT_TOKENS=3000 (~len // 4 tokens), first chunk always kept
+  -> generate      estimator.generate_estimate(query, context, source_ids)
+       failure or a non-estimate -> GenerationError -> 502
+  -> validate      validation.check_citations(estimate, allowed_ids)
+       any citation outside sources_of(context) -> ONE corrective retry: the
+       offending ids are named in <validation_feedback>, or its message when the
+       cited chunk_id was not an integer; still invalid -> 502
+  -> store         only on success, only with a key (256 entries, FIFO eviction)
+  -> 200 EstimateFromTranscriptResponse{estimate, query, chunks, retrieved,
+                                        cached, validation_retries, pipeline_ms}
+```
+
+**Two short circuits.**
+
+- **No chunk passes the distance floor.** The retrieval step passes
+  `Settings.RETRIEVAL_DISTANCE_THRESHOLD` (default 0.65, an upper bound on cosine
+  distance), so an unrelated brief yields zero chunks. The chain then answers without
+  calling the model at all: `grounded=false`, `modules=[]`, `total_hours=0`,
+  `citations=[]`, `confidence_pct=0`, `retrieved=0`, `validation_retries=0`. This is
+  a `200`, not a failure. `/v1/retrieval/search` applies no floor of its own, so the
+  same query against that route still returns the nearest chunks.
+- **Idempotency hit.** A keyed request that matches a stored entry returns the
+  stored response with `cached=true`. `pipeline_ms` is the **stored** duration —
+  how long the estimate took to produce, not how fast the cache answered. Nothing
+  is regenerated and nothing is billed.
+
+**State touched.** The in-process idempotency store only. One embedding call; one
+reformulation call — `complete_structured` with `model_override="gpt-4o-mini"`, which
+dispatches straight to LiteLLM for that model, so a provider failure lands in the
+reformulator's fallback rather than a retry; one generation call through the Router
+in the normal path, two when the corrective retry fires. No Redis entry, no
+usage-ledger row: the chain's spend never appears in `GET /api/v1/usage`.
+
+**Failure modes.** Each domain error carries its own status and public message
+(`app/generation/rag/errors.py`):
+
+| Status | Body | Stage |
+| --- | --- | --- |
+| 422 | FastAPI validation detail | body bounds, unknown field, `search_mode` outside the closed set |
+| 422 | `"No context available to build an estimate."` | `ContextAssemblyError` |
+| 502 | `"Could not interpret the transcript."` | `ReformulationError` — a blank transcript |
+| 502 | `"The estimation model is unavailable. Please retry later."` | `GenerationError` |
+| 502 | `"The estimate could not be grounded in the retrieved evidence."` | `CitationValidationError` after the one retry |
+| 500 | `"Failed to estimate from the transcript."` | anything else, including `RetrievalUnavailable` (not a `ChainError`); no exception text |
+
+**Stage routes.** `POST /v1/estimate/stages/{reformulate,retrieve,assemble,generate}`
+expose the steps one at a time, stateless, calling the same functions the chain
+calls. Each returns `{stage, latency_ms, …}` plus its payload: the
+`EstimationQuery`; the full `RetrievalResult` plus `chunks`; the assembled
+`context` plus the sorted `sources` ids; or the `GroundedEstimate`. They are a
+debugging surface, not a second API — `/stages/generate` deliberately does not
+validate citations.
+
 ## Planned flows
 
-Retrieval inside the estimation prompt is not implemented: `/search` is its own
-endpoint and `EstimationService` does not consult the corpus yet. Metadata
-filters, hybrid search and Postgres tuning are the live session's work, not this
-repository's. See specs [012](../specs/012-session-8-pgvector-and-search.md) and
-[015](../specs/015-session-9-hnsw-index.md).
+Retrieval now has a consumer: flow 11 is the arrow from the corpus to an estimate
+that this section used to say was missing. What remains out of scope, all by the
+Session-10 brief: metadata filters (`EstimationQuery.sector`, `technologies` and
+`project_year` are extracted and unused), query expansion, and multi-index
+routing. A Redis-backed idempotency store is the deferred operational item — the
+current store does not survive a restart.
 
-The gap is **composition, not retrieval**. `/search` returns chunks and distances
-on purpose — its consumers want the evidence, not a conclusion — so the missing
-piece is the stage that calls retrieval *in order to estimate*. Flow 7 above is
-therefore the last live step of that path, and no arrow leads from it to flow 3.
-The Session-9 diagnosis quantifies what that costs: same corpus, same embedding
-model, with a clear transcript `/search` returns distances around 0.41 and with
-an ambiguous one around 0.61 — see
-[`arquitectura-actual.md`](../arquitectura-actual.md).
+Flow 10 stays an inspection primitive: it returns chunks, scores and provenance
+and stops, which is what its consumers (`scripts/query_examples.py`,
+`examples/trace_s09.py`) need. Flow 11 is the only live path from retrieval to an
+estimate, and it calls flow 10's function rather than duplicating it. See specs
+[012](../specs/012-session-8-pgvector-and-search.md),
+[015](../specs/015-session-9-hnsw-index.md),
+[016](../specs/016-session-10-hybrid-and-rerank.md) and
+[017](../specs/017-session-10-grounded-estimation.md).

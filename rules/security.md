@@ -85,9 +85,13 @@ the auxiliary-model fallback.
   redacting it. A rejection is a 400, not a sanitized request.
 - The conversational flow sends transcripts to third-party providers. There is no
   local retention, but there is also no redaction beyond the regex layer.
-- **Retrieval is implemented** (`POST /search`) but **there is no vector index**:
-  retrieval is a sequential scan. Adding an index is `PLANNED — not yet
-  implemented`.
+- **Retrieval is implemented** over `POST /v1/retrieval/search` (hybrid vector +
+  full-text, fused with RRF, optionally reranked). The vector branch uses the HNSW
+  index `ix_chunks_embedding_hnsw` (spec 015); the lexical branch uses
+  `chunks.content_tsv` with a GIN index (spec 016). Neither the embeddings routes
+  nor the retrieval route is authenticated, so they are billed endpoints: the query
+  bound and the `top_k`/`recall_k` caps are the cost control, and the reranker is
+  CPU-bound and off by default.
 - **The vector store can pseudonymize on ingest, and does not by default.**
   `POST /embeddings/ingest` accepts `pseudonymize: true`, which rewrites each
   chunk's text through the PII pseudonymizer *before* embedding, so neither the

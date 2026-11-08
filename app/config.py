@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve .env from the project root so settings load the same way regardless of
@@ -73,6 +73,40 @@ class Settings(BaseSettings):
     SEMANTIC_CACHE_THRESHOLD: float = 0.92
     SEMANTIC_CACHE_TTL: int = 86400
     SEMANTIC_CACHE_LOG_ONLY: bool = False
+
+    # Session 10 — hybrid retrieval (full-text + vector, fused with RRF) and
+    # cross-encoder reranking. These are the knobs the four evaluation
+    # configurations (vector/hybrid x rerank on/off) are built from; every one of
+    # them must be changeable without editing code.
+    #
+    # Note: the full-text configuration is NOT here. It lives beside the SQL that
+    # uses it (`FTS_REGCONFIG` in `app/embedding_pipeline/store/repository.py`)
+    # and must match the migration's `to_tsvector(...)` literal exactly. Making it
+    # a setting would let an .env value silently disagree with the generated
+    # column, which bypasses the GIN index without failing anything.
+    # Default retrieval mode. "vector" reproduces the pre-Session-10 behaviour.
+    RETRIEVAL_SEARCH_MODE: Literal["vector", "hybrid"] = "vector"
+    # RRF smoothing constant (Cormack et al. default). Larger = a chunk must rank
+    # well in BOTH branches to win; smaller = a single #1 can dominate.
+    RRF_K: int = Field(default=60, ge=1, le=1_000)
+    # Recall-then-rerank width: fetch this many candidates, then let the
+    # cross-encoder cut them down to RERANK_TOP_N. This is the expensive knob —
+    # it drives both the SQL LIMIT and the cross-encoder batch size.
+    RETRIEVAL_RECALL_TOP_K: int = Field(default=50, ge=1, le=200)
+    RERANK_TOP_N: int = Field(default=5, ge=1, le=50)
+    # Whether reranking runs when the request does not say. Off by default: the
+    # model is a ~120 MB download and the cheap path must stay cheap.
+    RERANKER_ENABLED: bool = False
+    # Multilingual cross-encoder (ES+EN), small enough to run on CPU.
+    RERANKER_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    # Cosine-distance floor for the grounded-estimation chain. `/v1/retrieval/search`
+    # deliberately does not apply a floor by default (a caller wants to see the
+    # nearest chunks even when they are poor); the chain does, because "the corpus
+    # has no analogue for this project" is a result it must be able to report.
+    # Calibrated on this corpus on 2026-11-08: relevant queries land at 0.43–0.60,
+    # an unrelated topic ("satellite imagery of coral reefs") at 0.71–0.72. Re-tune
+    # if the embedding model or the chunking template changes.
+    RETRIEVAL_DISTANCE_THRESHOLD: float = Field(default=0.65, ge=0.0, le=2.0)
 
     # Session 7 (extension) — data ingestion: catalog, cleaning, PII, persistence.
     # Paths are resolved from the project root, never from the process working

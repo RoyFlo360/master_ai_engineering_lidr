@@ -9,13 +9,16 @@
 | Health | `/health` | Current |
 | OpenAPI UI | `/docs`, `/redoc` | Current |
 | Embedding ingest | `/embeddings` | Current, unversioned by mandate (specs 010, 012) |
-| Semantic search | `/search` | Current, unversioned by mandate (spec 012) |
+| Retrieval search | `/v1/retrieval/search` | Current (spec 016); replaced `/search`, retired in Session 10 |
 | Ingestion runs and jobs | `/api/v1/ingestion` | Current (spec 011) |
 
 - New business endpoints go under `/api/v1`.
-- `/embeddings` and `/search` are the sanctioned exceptions: the Session 7 and 8
-  briefs mandate those exact paths, and the grader and live session call them.
-  Do not move them under `/api/v1`.
+- `/embeddings` is the sanctioned exception: the Session 7 and 8 briefs mandate that
+  exact path, and the grader and live session call it. Do not move it under `/api/v1`.
+- `/v1/retrieval/search` is versioned but not under `/api/v1` because the Session-10
+  brief names that path. The older `/search` was **retired** in Session 10; do not
+  reintroduce it as a second retrieval route (two paths, two behaviours is exactly
+  the defect the retirement removed).
 - Ingestion error bodies are **flat** (`{"reason": ...}`), not nested under
   `detail`, because spec 011 promises that shape; the other routers use FastAPI's
   default. Both are deliberate — check the spec before "unifying" them.
@@ -43,7 +46,8 @@ Every route declares `response_model` except the SSE endpoint. See
 | `POST /sessions/{session_id}/estimate-acb` | `ACBResponse` |
 | `POST /embeddings/ingest` | `IngestResponse` (declares a documented 409) |
 | `POST /embeddings/compare` | `CompareResponse` (stats + top-k per strategy) |
-| `POST /search` | `SearchResponse` |
+| `POST /search` | retired in Session 10; the route no longer exists |
+| `POST /v1/retrieval/search` | `RetrievalResult` (declares 502 on reranker failure) |
 | `POST /api/v1/ingestion/runs` | `IngestionRunResponse` |
 | `GET /api/v1/ingestion/jobs/{job_id}` | `IngestionJobView` |
 | `GET /health` | plain `dict` |
@@ -54,6 +58,7 @@ Every route declares `response_model` except the SSE endpoint. See
 | --- | --- | --- |
 | `POST /api/v1/estimate` | 200 | 422 body validation; 500 `LLMServiceError` |
 | `POST /api/v1/new-estimate` | 200 | 422 body validation; 502 upstream failure |
+| `POST /v1/retrieval/search` | 200 | 422 body validation; 502 reranker unavailable; 500 embedder/store unavailable |
 | `GET /api/v1/usage` | 200 | — |
 | `POST /api/v1/estimate/stream` | 200 (SSE) | 422 body validation; errors after the first frame arrive as an `error` SSE frame, not a status |
 | `POST /sessions` | 201 | — |
@@ -108,7 +113,7 @@ Rules:
 | 404 | The addressed resource does not exist | Unknown `session_id` |
 | 415 | The upload type is not supported | An attachment whose extension is not `.pdf` or `.docx` |
 | 500 | The legacy endpoint failed, including an unusable provider response | Provider error; `finish_reason="length"`; empty estimation |
-| 502 | An upstream LLM call failed on a typed or conversational endpoint | Provider error, Instructor exhaustion, critic/actor failure that is not degraded |
+| 502 | An upstream LLM call failed on a typed or conversational endpoint; or a requested rerank step failed on `/v1/retrieval/search` | Provider error, Instructor exhaustion, critic/actor failure that is not degraded, cross-encoder load/score failure |
 
 Two boundary notes:
 

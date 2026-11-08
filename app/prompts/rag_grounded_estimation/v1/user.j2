@@ -1,0 +1,14 @@
+<sources>
+{{ context }}
+</sources>
+
+<project_brief>
+{{ query.model_dump_json(indent=2) }}
+</project_brief>
+{% if invalid_citation_ids or invalid_citation_note %}
+<validation_feedback>
+{% if invalid_citation_ids %}The previous estimate cited chunk ids that are not present in <sources>: {{ invalid_citation_ids | join(", ") }}.{% endif %}{% if invalid_citation_note %} {{ invalid_citation_note }}{% endif %} Every citation.chunk_id must be an integer matching one of the id attributes of the <source> blocks above. Rewrite the estimate citing only retrieved ids, and drop any claim whose evidence is not in <sources>.
+</validation_feedback>
+{% endif %}
+
+Estimate the project in <project_brief> using only the evidence in <sources>, and cite the id of every block you rely on.

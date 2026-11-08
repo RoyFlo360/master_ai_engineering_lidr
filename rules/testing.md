@@ -53,6 +53,37 @@ Three layers, three kinds of test:
 A new endpoint on this surface needs all three, and the default suite must stay
 free of Postgres and OpenAI.
 
+## The retrieval surface (Session 10)
+
+Same three layers, plus two rules the retrieval code needs and the vector store did
+not:
+
+- **Never import torch in a hermetic test.** `sentence_transformers` and `torch` are
+  imported lazily inside `CrossEncoderReranker._ensure_loaded`. A test that imports
+them adds seconds and a 120 MB download to the suite. Inject a fake reranker into
+  `retrieve(..., reranker=...)`. `tests/test_reranker.py` and
+`tests/test_retrieval_maintainability.py` both assert the module stays torch-free,
+  the second in a subprocess.
+- **Destructive fixtures clean only what they own.** `TEST_DATABASE_URL` is commonly
+  pointed at the compose database. A fixture that runs `DELETE FROM chunks` wipes the
+  ingested corpus (this happened in Session 10). Scope the delete by a marker the test
+  itself writes — `tests/test_retrieval_postgres.py` uses a `source_path` prefix.
+
+Pure functions get pure tests: `tests/test_rrf_fusion.py` needs no fake, no client
+and no database, and it is the file that catches a ranking bug fastest.
+
+## Mutation testing
+
+A targeted mutation run is an optional gate, never part of `uv run pytest -q`:
+
+- Scope it to the decision logic (fusion, the pipeline, the reranker wrapper), not
+  the whole tree; a full run on this suite takes hours.
+- The harness is `scripts/mutation_s10.ps1` with `[tool.mutmut]` in
+  `pyproject.toml`. **`mutmut` does not run on native Windows** — use WSL or CI. It
+  is unrun on the Windows dev box, and that must be said rather than implied.
+- A survivor is a finding to triage, not a number to hide. List survivors with a
+  one-line justification each; do not lower the threshold to make a run pass.
+
 ## The four categories
 
 A new subsystem (the Session-7 embedding pipeline and ingestion pipeline included)

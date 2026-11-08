@@ -40,10 +40,14 @@ services:
       DATABASE_URL: postgresql+psycopg://estimator:estimator@postgres:5432/estimator
       # Windows bind mounts do not emit inotify events, so poll for changes.
       WATCHFILES_FORCE_POLLING: "true"
+      # Cross-encoder weights (~120 MB) live in a named volume so a container
+      # recreate does not force a re-download of the reranker model.
+      HF_HOME: /root/.cache/huggingface
     env_file:
       - .env
     volumes:
       - .:/srv/app
+      - hf_cache:/root/.cache/huggingface
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -94,3 +98,4 @@ services:
 
 volumes:
   postgres_data:
+  hf_cache:

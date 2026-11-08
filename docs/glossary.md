@@ -12,10 +12,13 @@ vector-similarity cache. It is the architecture the service is built around, hen
 "Software Estimation CAG Service" in the OpenAPI title.
 
 **RAG (Retrieval Augmented Generation)** — retrieving source documents and putting
-them in the prompt before generating. The shipped service does **no** retrieval: the
-prompt contains the transcript, the metadata block and the estimation examples only.
-The in-progress Session-7 work (spec 010) produces embeddings that a later retrieval
-phase could use; nothing retrieves yet.
+them in the prompt before generating. Retrieval exists as its own surface
+(`POST /search` in Sessions 8–9, replaced by `POST /v1/retrieval/search` in
+Session 10), and the grounded-estimation chain
+(`POST /v1/estimate/from-transcript`) consumes it: transcript → reformulated
+query → retrieved chunks → `<source>` context → estimate with citations. The five
+pre-Session-10 estimation flows still put only the transcript, the metadata block
+and the examples in the prompt.
 
 **ACB (Actor-Critic-Boss)** — the audit loop behind `/sessions/{id}/estimate-acb`. An
 *actor* drafts an estimation, a *critic* reviews it independently and returns
@@ -59,7 +62,9 @@ the tier and the rule.
 **Prompt version** — the directory under `app/prompts/<use_case>/<version>/`. The
 version is a string at the call site: `v1` for the typed flow, `v3` for the
 conversational flow (`v2` is the earlier baseline without the audience block), plus
-`critic/v1`, `conversation_summary/v1` and `metadata_extraction/v1`.
+`critic/v1`, `conversation_summary/v1`, `metadata_extraction/v1`,
+`rag_reformulation/v1` (transcript → query) and `rag_grounded_estimation/v1`
+(query + `<sources>` → estimate).
 
 **Metadata** — `ProjectMetadata`: project name, assumed team size, mentioned
 technologies and agreed scope, refreshed after every conversational turn. The
@@ -130,6 +135,101 @@ schema adherence, cost/duration bounds and content recall. Not part of pytest.
 **Stress run** — the multi-turn scenario runner in `evals/stress/` that measures
 memory drift, latency and cost across turns and attachment sizes. Not part of pytest.
 
+## Retrieval vocabulary
+
+**Lexical branch (full-text search)** — the keyword path of the query-time
+pipeline: `ChunkStore.search_lexical` runs `plainto_tsquery(FTS_REGCONFIG, query)`
+against the generated `chunks.content_tsv` column and orders by `ts_rank_cd`. It
+runs only in `hybrid` mode; `vector` mode never queries it.
+
+**`tsvector`, GIN and `ts_rank_cd`** — `content_tsv` is a Postgres `tsvector`
+generated from `chunks.content` with `to_tsvector('english', content)`, indexed
+with GIN (`ix_chunks_content_tsv`) so the `@@` match uses the index. `ts_rank_cd`
+is the cover-density rank used for ordering; its value travels as
+`RetrievedChunk.rank`. `FTS_REGCONFIG` is the one configuration constant, mirrored
+by a literal in migration `0004_rag_fts`; it is deliberately not a setting, because
+an env value that disagreed with the stored column would bypass the index silently.
+
+**Reciprocal Rank Fusion (RRF)** — combining several ranked lists by summing
+`1 / (k + rank)` per document, with 1-based ranks. `k` (default 60) controls how
+much one top position can dominate; a larger `k` requires a document to rank well
+in both lists. Implemented by `reciprocal_rank_fusion` in
+`app/generation/rag/retrieval/fusion.py`; a duplicate id inside one list does not
+score twice. Used only in `hybrid` mode.
+
+**Bi-encoder vs cross-encoder** — a bi-encoder embeds the query and each document
+independently, which makes k-NN over a corpus cheap; a cross-encoder feeds the
+query and one document through the same transformer as a pair, which ranks better
+but costs one forward pass per candidate. The vector branch is a bi-encoder
+(`text-embedding-3-small`); `CrossEncoderReranker` is a cross-encoder.
+
+**Recall-then-rerank** — the two-stage shape of the pipeline: fetch
+`RETRIEVAL_RECALL_TOP_K` candidates cheaply (vector, optionally fused with the
+lexical branch), then let the cross-encoder score only those pairs and keep
+`RERANK_TOP_N` survivors. The first stage supplies recall, the second precision.
+
+**`source` provenance** — `RetrievedChunk.source` says which branch produced a
+hit: `vector`, `lexical`, or `fused` when both returned it. `distance` is `null`
+for a lexical-only hit; reranking reorders results but never rewrites `source`.
+
+**`low_confidence`** — `RetrievalResult.low_confidence` is `true` only when no
+chunk survived. Despite the name it is not a score threshold;
+`distance_threshold` is the optional cosine-distance floor on the vector branch.
+
+## Grounded-estimation vocabulary
+
+**Reformulation** — turning one client transcript into the retrieval query and a
+structured brief. `app/generation/rag/query_reformulator.py` makes one cheap LLM
+call (auxiliary model, `gpt-4o-mini`) with `rag_reformulation/v1` and returns an
+`EstimationQuery`. It is **advisory**: any failure degrades to a
+`source="fallback"` query built by truncating the transcript, with `confidence`
+capped at 0.3. Only a transcript that is empty after cleaning raises
+`ReformulationError`.
+
+**`search_query` vs `summary`** — `EstimationQuery` carries two strings on purpose.
+`summary` is two or three sentences for the answer; `search_query` is the
+canonical string that is embedded and run through the lexical branch. The corpus
+is English and the transcripts are usually Spanish, so translating is part of
+reformulation — a Spanish `search_query` matches nothing. `confidence` is a third,
+separate field: how complete the brief was, not how good the query is.
+
+**Context assembly** — rendering ranked chunks as `<source id=… budget=… sector=…
+year=…>` blocks under a token budget. `app/generation/rag/context_assembler.py` is
+pure (no I/O, no LLM), keeps rank order, and truncates **whole chunks**:
+`MAX_CONTEXT_TOKENS = 3000` approximated as `len(text) // 4`, with the first chunk
+always kept. `sources_of(chunks)` returns exactly the ids that made it into the
+text.
+
+**Distance floor** — the cosine-distance ceiling above which a retrieved chunk is
+not evidence. `Settings.RETRIEVAL_DISTANCE_THRESHOLD` defaults to `0.65` and is
+applied by the estimate chain only; `/v1/retrieval/search` applies a floor only
+when the request asks for one. Calibrated on this corpus: relevant queries score
+0.43–0.60, an unrelated topic 0.71–0.72. When no chunk is close enough to clear the
+floor (distance ≤ 0.65) the chain returns `grounded=false` — not a low-confidence
+estimate.
+
+**Grounded / ungrounded estimate** — a grounded estimate was produced from
+`<source>` blocks that reached the prompt: `GroundedEstimate.grounded` is `True`
+and every `Citation.chunk_id` is one of them. An ungrounded estimate means the
+prompt had no context, so the model was **not called at all** and the response
+carries no modules, no hours, `citations=[]`, `confidence_pct=0`. It is an answer,
+not a failure, and retrying it will not change it.
+
+**Citation validation** — checking every `Citation.chunk_id` against
+`sources_of(context)`, the ids the model was actually shown.
+`app/generation/rag/validation.py` is pure and reports the offending ids; the
+orchestrator regenerates **once**, naming them in the prompt, and raises
+`CitationValidationError` if the second estimate still cites something unknown.
+A chunk truncated out of the context for budget cannot be cited, even though it
+was retrieved.
+
+**Idempotency key** — the optional `idempotency_key` on
+`POST /v1/estimate/from-transcript` that makes a retry a replay instead of a second
+paid generation. The store key is `sha256(idempotency_key + "\x00" + transcript)`,
+so the same key with different text is a different request. The store is
+in-process (256 entries, FIFO), does not survive a restart, and is per worker; a
+replay returns the stored body with `cached=true` and the original `pipeline_ms`.
+
 ## Other
 
 **Guardrail** — an input or output check. Input: moderation, prompt-injection regexes,
@@ -147,7 +247,8 @@ estimation service, session store, OpenAI client) are such seams.
 
 **Vector store** — the `documents` and `chunks` tables in Postgres with the
 `vector` extension (spec 012). Postgres-only; a SQLite `DATABASE_URL` keeps every
-other flow working and disables `/embeddings/ingest` and `/search`.
+other flow working and disables `/embeddings/ingest`, `/v1/retrieval/search` and
+the estimate chain's retrieval step.
 
 **Document row** — one ingested budget: `source_path` (unique provenance),
 `document_type`, `ingested_at` and JSONB metadata.
@@ -172,17 +273,22 @@ operator or the planner ignores the index.
 than the HNSW graph walk. At 60 chunks that is the correct choice; it is no
 longer the only option.
 
-**Retrieval primitive vs composition** — `/search` is a *primitive*: it returns
-the evidence (chunks, distances) and stops, because that is what its consumers
-need. *Composition* is the stage that calls a primitive for a purpose. This
-repository has the primitive and no composition, which is why an estimate is
-never grounded in the corpus; see `arquitectura-actual.md`. Adding estimation to
-`/search` would conflate the two and make retrieval impossible to inspect on its
-own.
+**Retrieval primitive vs composition** — `/v1/retrieval/search` is a
+*primitive*: it returns the evidence (chunks, scores, provenance) and stops,
+because that is what its consumers need. *Composition* is the stage that calls a
+primitive for a purpose, and it now exists:
+`orchestrator.estimate_from_transcript` calls the pipeline in order to estimate,
+and `POST /v1/estimate/from-transcript` mounts it. Keeping the two apart is what
+lets retrieval stay inspectable: the four `/v1/estimate/stages/*` routes expose
+each step of the chain separately instead of folding retrieval into an estimation
+endpoint.
 
 **Abstention** — returning "insufficient evidence" instead of the *k* least-bad
-chunks when nothing crosses a relevance threshold. Proposed, not implemented:
-`/search` accepts `k` and has no distance threshold.
+chunks when nothing is relevant. The estimate chain does this: nothing above
+`RETRIEVAL_DISTANCE_THRESHOLD` yields `grounded=false`, no modules, no citations,
+and no generation call. `/v1/retrieval/search` still returns the nearest chunks
+and reports `low_confidence` when zero survive — it never returns an explicit
+abstention answer.
 
 **Chunking strategy** — one implementation of the `Chunker` ABC in
 `app/embedding_pipeline/chunking/strategies/`. Eight exist: `structural` (the

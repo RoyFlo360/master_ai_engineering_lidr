@@ -37,6 +37,23 @@ recorded in their accepted specs:
   PII handling and orchestration co-located, grouped by sub-package (spec 011).
 - `app/embedding_pipeline/store/` — the pgvector ORM models and the async
   repository live beside the chunker and the embedder (spec 012).
+- `app/generation/rag/retrieval/` — the **query half** of RAG: schemas, fusion,
+  pipeline, reranker, gate and router co-located (spec 016). Its own `README.md`
+  states the boundary; `tests/test_retrieval_maintainability.py` enforces it.
+
+### RAG is two packages; the edge points one way
+
+| Package | Owns |
+| --- | --- |
+| `app/embedding_pipeline/` | the corpus: chunk → embed → persist → `chunks` |
+| `app/generation/rag/retrieval/` | the query: lexical + vector → RRF → rerank → `/v1/retrieval/search` |
+
+The query half may import `ChunkStore`, `OpenAIEmbedder` and the embedding schemas.
+Nothing under `app/embedding_pipeline/` may import from `app.generation`. New
+retrieval code goes in `app/generation/rag/retrieval/`; new chunking, embedding or
+storage code goes in `app/embedding_pipeline/`. When in doubt, ask which lifecycle
+the code serves — offline ingest or per-request retrieval — not which feature it
+mentions.
 
 **Two declarative bases, deliberately.** `app.persistence.models.Base` holds the
 portable tables; `app.embedding_pipeline.store.models.RagBase` holds the

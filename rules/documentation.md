@@ -20,7 +20,11 @@ to the next free number.
 
 ## The duty to update docs and rules
 
-Documentation is part of the change, not a follow-up. In the same change as the code:
+Documentation is part of the change, not a follow-up. [closeout.md](closeout.md) carries
+the per-change checklist — every artifact, in the same change — and the evidence that
+closes it out. The summary table below says which docs a given edit touches.
+
+In the same change as the code:
 
 | If you changed | Update |
 | --- | --- |

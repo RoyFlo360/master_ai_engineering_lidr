@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.embedding_pipeline.router import router as embeddings_router
-from app.embedding_pipeline.search_router import router as search_router
+from app.generation.rag.estimate_router import router as estimate_router_rag
+from app.generation.rag.retrieval.router import router as retrieval_router
 from app.ingestion.startup import validate_catalog_at_startup
 from app.routers import estimations, ingestion, sessions
 
@@ -71,7 +72,8 @@ app.add_middleware(
 app.include_router(estimations.router)
 app.include_router(sessions.router)
 app.include_router(embeddings_router)
-app.include_router(search_router)
+app.include_router(retrieval_router)
+app.include_router(estimate_router_rag)
 app.include_router(ingestion.router)
 
 

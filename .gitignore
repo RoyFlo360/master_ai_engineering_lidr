@@ -35,4 +35,11 @@ var/
 .vscode/
 
 .codewhale/
+.agents/
+/.agents/
 /docs/instrucctions-missing/
+# mutmut scratch (scripts/mutation_s10.ps1); the report goes to var/
+mutants/
+.mutmut-cache
+
+/.agents/

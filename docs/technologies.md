@@ -29,7 +29,7 @@ lockfile; `uv lock --check` reports whether it still matches the project file.
 | `tiktoken` | `>=0.7.0` | Token counting for the embedding chunker (`app/embedding_pipeline/chunker.py`) | `token_count` is unavailable; the embedder cannot size its batches by tokens |
 | `pyyaml` | `>=6.0` | Catalog loading (`app/ingestion/catalog/loader.py`) | The catalog cannot be read; ingestion has no allow-list |
 | `sqlalchemy[asyncio]` | `>=2.0` | Persistence models and repositories, plus the async RAG store. The extra pulls `greenlet`, which SQLAlchemy's asyncio extension requires | No job rows, no pseudonym mappings, and no async vector store |
-| `asyncpg` | `>=0.29` | Async Postgres driver for `/embeddings/ingest` and `/search` (spec 012) | The vector endpoints cannot run; the sync stack is unaffected |
+| `asyncpg` | `>=0.29` | Async Postgres driver for `/embeddings/ingest` and `/v1/retrieval/search` (specs 012 and 016) | The vector endpoints cannot run; the sync stack is unaffected |
 | `pgvector` | `>=0.3` | Registers the `vector` column type and exposes `cosine_distance` to SQLAlchemy | The RAG tables cannot be declared or migrated |
 | `anthropic` | `>=0.40` | Native Anthropic SDK, used by the `contextual_retrieval` chunker for `cache_control` on the parent document | That strategy is unavailable; the comparison still runs the other seven |
 | `langchain-text-splitters` | `>=0.3.0` | Separator-hierarchy splitting for the `recursive` chunker | The `recursive` strategy is unavailable |
@@ -46,6 +46,16 @@ lockfile; `uv lock --check` reports whether it still matches the project file.
 | `presidio-anonymizer` | `>=2.2` | PII replacement | Same as above |
 | `spacy` | `>=3.7` | Spanish NER model behind Presidio | Only the regex fallback remains until the model is installed |
 | `es-core-news-md` | pinned wheel URL, `3.8.0` | Spanish NER model (`PRESIDIO_SPACY_MODEL`) | Presidio misses Hispanic names; PII degrades to emails/ids only — no `PERSON` |
+| `sentence-transformers` | `>=3.0` (`uv.lock` resolves 6.2.0) | Cross-encoder reranker for `rerank=true` on `/v1/retrieval/search`; brings `torch` (2.15.0) and `transformers` transitively | Only `rerank=true` fails (502). The un-reranked configurations and every other endpoint work |
+
+`sentence-transformers` and its `torch` transitive are the largest addition to the
+dependency set, and neither is imported at module scope:
+`CrossEncoderReranker._ensure_loaded` imports both lazily, so the API starts,
+serves every other flow, and even serves `rerank=false` retrieval on a deployment
+where the reranker runtime is unusable. The model
+(`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, ~120 MB) downloads on the first
+reranked request and is cached under `HF_HOME`; the gate in `operations.md` checks
+it before measurement.
 
 ## Development dependencies
 

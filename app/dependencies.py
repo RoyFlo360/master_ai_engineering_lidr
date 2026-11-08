@@ -269,6 +269,19 @@ def get_semantic_retriever() -> SemanticRetriever | None:
 
 
 @lru_cache
+def get_reranker():
+    """Cross-encoder reranker singleton (Session 10).
+
+    The model loads lazily on the first rerank, so constructing this is cheap and
+    importing the module pulls no torch. Imported inside the function on purpose:
+    the package must stay importable on a machine without the extras installed.
+    """
+    from app.generation.rag.retrieval.reranker import CrossEncoderReranker
+
+    return CrossEncoderReranker.from_settings()
+
+
+@lru_cache
 def get_usage_ledger() -> UsageLedger:
     """One ledger per process, shared by every request it serves."""
     return UsageLedger()

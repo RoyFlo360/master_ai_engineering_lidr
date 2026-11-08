@@ -23,14 +23,14 @@ Update the document in the same change (`rules/documentation.md`).
 | --- | --- |
 | The system in ten minutes: containers, components, request paths | [architecture.md](architecture.md) |
 | Which library does what, and what breaks without it | [technologies.md](technologies.md) |
-| To trace one endpoint end to end, or tell the nine flows apart | [data-flows.md](data-flows.md) |
+| To trace one endpoint end to end, or tell the eleven flows apart | [data-flows.md](data-flows.md) |
 | A model's fields, bounds and validators | [data-model.md](data-model.md) |
 | To run, test, evaluate, stress or debug the service | [operations.md](operations.md) |
 | To decode CAG, ACB, anchor, tier, observation or cache-hit kind | [glossary.md](glossary.md) |
-| What retrieval actually returns, and why no estimate follows from it | [arquitectura-actual.md](../arquitectura-actual.md) |
+| What the Session-9 transcript trace found, and the gap it motivated | [arquitectura-actual.md](../arquitectura-actual.md) |
 | To know why something is the way it is, and where that was decided | [decisions.md](decisions.md) |
 | To know the conventions a change must follow | [rules/README.md](../rules/README.md) |
-| The agent-facing orientation and its 72 gotchas | [AGENTS.md](../AGENTS.md) |
+| The agent-facing orientation and its 84 gotchas | [AGENTS.md](../AGENTS.md) |
 
 ## Conventions in these files
 

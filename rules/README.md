@@ -13,6 +13,7 @@ do; [the documentation folder](../docs/README.md) describes what the system *is*
 | [qa.md](qa.md) | deciding whether a change is done, and what evidence to paste |
 | [security.md](security.md) | handling secrets, input caps, guardrails or personal data |
 | [documentation.md](documentation.md) | changing behaviour that a spec, doc or rule describes |
+| [closeout.md](closeout.md) | finishing a change: which files must be updated before it is done |
 
 ## Read this if you need X
 
@@ -25,6 +26,7 @@ do; [the documentation folder](../docs/README.md) describes what the system *is*
 | The definition of done and the evidence format | [qa.md](qa.md) |
 | What must never be logged, and which guardrails fail open | [security.md](security.md) |
 | Whether this change needs a spec, and which docs to update | [documentation.md](documentation.md) |
+| The per-change checklist that must be walked before declaring done | [closeout.md](closeout.md) |
 
 ## Precedence
 

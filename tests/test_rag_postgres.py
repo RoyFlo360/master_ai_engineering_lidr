@@ -117,9 +117,18 @@ def session_factory():
     factory = async_sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
     async def _cleanup() -> None:
+        # Only the documents this module creates. A blanket ``DELETE FROM chunks``
+        # wipes whatever corpus the target database already holds, and
+        # ``TEST_DATABASE_URL`` is commonly pointed at the compose database —
+        # running ``-m postgres`` would then destroy the ingested budgets (it did,
+        # once, during Session 10). The real corpus is ingested as
+        # ``data/budgets_sample.json::<id>``; this module owns ``sample::<id>``.
         async with factory() as session, session.begin():
-            await session.execute(delete(ChunkRow))
-            await session.execute(delete(DocumentRow))
+            owned = select(DocumentRow.id).where(DocumentRow.source_path.like("sample::%"))
+            await session.execute(delete(ChunkRow).where(ChunkRow.document_id.in_(owned)))
+            await session.execute(
+                delete(DocumentRow).where(DocumentRow.source_path.like("sample::%"))
+            )
 
     asyncio.run(_cleanup())
     yield factory
@@ -207,9 +216,21 @@ def test_ingest_persists_document_and_chunks(ingest_service, session_factory) ->
     assert first.document_id != second.document_id
 
     async def _counts() -> tuple[int, int]:
+        # Count only this module's rows. Counting the whole table made the test
+        # depend on the fixture wiping the database; on a database that already
+        # holds the ingested corpus it counted 19 documents and failed.
         async with session_factory() as session:
-            documents = await session.scalar(select(func.count()).select_from(DocumentRow))
-            chunks = await session.scalar(select(func.count()).select_from(ChunkRow))
+            documents = await session.scalar(
+                select(func.count())
+                .select_from(DocumentRow)
+                .where(DocumentRow.source_path.like("sample::%"))
+            )
+            chunks = await session.scalar(
+                select(func.count())
+                .select_from(ChunkRow)
+                .join(DocumentRow, ChunkRow.document_id == DocumentRow.id)
+                .where(DocumentRow.source_path.like("sample::%"))
+            )
         return documents, chunks
 
     documents, chunks = asyncio.run(_counts())
@@ -288,14 +309,26 @@ def test_search_orders_by_cosine_distance(ingest_service, session_factory) -> No
     assert response.results[0].metadata["budget_id"] == "BUD-NEAR"
 
 
-def test_search_on_an_empty_corpus_returns_no_results(session_factory) -> None:
+def test_search_respects_k_on_a_populated_corpus(session_factory) -> None:
+    """``k`` is honoured by SQL even when the table holds unrelated rows.
+
+    This file's fixture no longer empties the database (that wiped the ingested
+    corpus), so the old "empty corpus" premise is gone. The empty-result contract
+    is covered hermetically by ``tests/test_retrieval_route.py::
+    test_empty_corpus_is_a_200_with_low_confidence`` and
+    ``tests/test_hybrid_retrieve.py::test_empty_result_is_low_confidence``; what
+    still needs a real database is that ``LIMIT`` and the cosine ordering agree.
+    """
     retriever = SemanticRetriever(
         embedder=IndexedEmbedder(),
         session_factory=session_factory,
         store=ChunkStore(),
     )
-    response = asyncio.run(retriever.search(query="anything", k=5))
-    assert response.results == []
+    response = asyncio.run(retriever.search(query="anything", k=3))
+
+    assert len(response.results) <= 3
+    distances = [hit.distance for hit in response.results]
+    assert distances == sorted(distances), "results must come back nearest-first"
 
 
 def test_deleting_a_document_cascades_to_its_chunks(ingest_service, session_factory) -> None:
@@ -303,12 +336,29 @@ def test_deleting_a_document_cascades_to_its_chunks(ingest_service, session_fact
 
     async def _delete_document() -> tuple[int, int]:
         async with session_factory() as session, session.begin():
-            document_id = await session.scalar(select(DocumentRow.id))
+            # Scope to THIS module's document. A bare ``select(DocumentRow.id)``
+            # returns the first row in the table, which on a database that
+            # already holds the corpus is a real ingested budget — the test
+            # would delete it and then assert an empty table that only looked
+            # empty because the old fixture wiped everything.
+            document_id = await session.scalar(
+                select(DocumentRow.id).where(DocumentRow.source_path.like("sample::%"))
+            )
+            assert document_id is not None, "the sample document should have been ingested"
             await session.execute(delete(DocumentRow).where(DocumentRow.id == document_id))
         async with session_factory() as session:
-            documents = await session.scalar(select(func.count()).select_from(DocumentRow))
-            chunks = await session.scalar(select(func.count()).select_from(ChunkRow))
-        return documents, chunks
+            owned_documents = await session.scalar(
+                select(func.count())
+                .select_from(DocumentRow)
+                .where(DocumentRow.source_path.like("sample::%"))
+            )
+            owned_chunks = await session.scalar(
+                select(func.count())
+                .select_from(ChunkRow)
+                .join(DocumentRow, ChunkRow.document_id == DocumentRow.id)
+                .where(DocumentRow.source_path.like("sample::%"))
+            )
+        return owned_documents, owned_chunks
 
     documents, chunks = asyncio.run(_delete_document())
     assert documents == 0

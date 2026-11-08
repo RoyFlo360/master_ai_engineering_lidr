@@ -4,7 +4,9 @@
 
 One FastAPI application turns a transcription or a typed brief into a software
 project estimation. It is a course project: one process, no authentication, no
-database, no multi-tenancy. Three Streamlit apps are plain HTTP clients of the API.
+multi-tenancy. Persistence is Postgres for the vector store and the ingestion
+job rows, and process memory for sessions and usage totals. Three Streamlit apps
+are plain HTTP clients of the API.
 
 Redis is optional at runtime. When it is unreachable the exact-match cache logs a
 warning and the request proceeds uncached; when it lacks RediSearch the semantic
@@ -41,7 +43,9 @@ apply live.
 A Postgres container (`pgvector/pgvector:pg16`, host port 5433) backs both
 persistence layers. It holds four tables: `pseudonym_mappings` and
 `ingestion_jobs` (ingestion, spec 011), plus `documents` and `chunks` with the
-`vector` extension enabled (the RAG store, spec 012).
+`vector` extension enabled (the RAG store, spec 012). Migration `0004_rag_fts`
+adds a stored `chunks.content_tsv` column and a GIN index over it; the HNSW
+index is untouched.
 
 Outside compose the default `DATABASE_URL` is a SQLite file at `var/estimator.db`,
 so the test suite and a plain `uvicorn` run need no database. `DATABASE_URL` is
@@ -61,19 +65,24 @@ the only switch between the two; the SQL is portable.
 | `GET /health` | `app/main.py` | `Settings` | plain dict | none |
 | `POST /embeddings/ingest` | `app/embedding_pipeline/router.py` | `RagIngestService` → chunker + `OpenAIEmbedder` + `ChunkStore` (one transaction) | `app/embedding_pipeline/schemas.py` | `get_rag_ingest_service` |
 | `POST /embeddings/compare` | same router | `ChunkingComparator` → eight `Chunker` strategies + `OpenAIEmbedder` (nothing persisted) | `app/embedding_pipeline/analysis/comparison.py` | `get_embedder`, `build_chunkers` |
-| `POST /search` | `app/embedding_pipeline/search_router.py` | `SemanticRetriever` → embedder + `ChunkStore.search` | same module | `get_semantic_retriever` |
+| `POST /v1/retrieval/search` | `app/generation/rag/retrieval/router.py` | `pipeline.retrieve` → embedder + `ChunkStore.search`/`search_lexical` + `reciprocal_rank_fusion` + `CrossEncoderReranker` | `app/generation/rag/retrieval/schemas.py` | `get_embedder`, `get_chunk_store`, `get_retrieval_session_factory`, `get_reranker` |
+| `POST /v1/estimate/from-transcript` | `app/generation/rag/estimate_router.py` | `orchestrator.estimate_from_transcript` → reformulator + `pipeline.retrieve` + context assembler + estimator + citation validation + idempotency store | `app/generation/rag/schemas.py` | router-local `get_estimate_settings`; otherwise module-level `get_settings`, lazy `get_llm_wrapper`, `get_idempotency_store` |
+| `POST /v1/estimate/stages/{reformulate,retrieve,assemble,generate}` | same router | the same stage functions, called one at a time | `app/generation/rag/schemas.py` + router-local stage bodies | same |
 | `POST /api/v1/ingestion/runs`, `GET /api/v1/ingestion/jobs/{id}` | `app/routers/ingestion.py` | `app/ingestion/orchestrator.py` + repositories | `app/schemas/ingestion.py` | catalog, loader, registry, job session factory |
 
-Fourteen paths appear in the OpenAPI document. `/docs` and `/redoc` are FastAPI's own
+Nineteen paths appear in the OpenAPI document. `/docs` and `/redoc` are FastAPI's own
 pages, served because `app/main.py` passes `docs_url` and `redoc_url` explicitly.
 
 ### Layering
 
 ```text
-app/routers/*          HTTP only: parse, delegate, translate exceptions
+app/routers/*, app/generation/rag/estimate_router.py,
+app/generation/rag/retrieval/router.py
+                       HTTP only: parse, delegate, translate exceptions
         |
         v
 app/services/*         pipeline logic, provider calls, caches, orchestration
+app/generation/rag/*   the four retrieval configurations, the estimation chain
         |     \
         |      +--> app/prompts/loader.py (Jinja2 templates on disk)
         |      +--> app/guardrails/*   (input layers, output filter)
@@ -139,6 +148,35 @@ POST /sessions/{id}/estimate
 GET  /sessions/{id}               -> metadata, window size, anchors, summary, last tier
 ```
 
+Retrieval:
+
+```text
+POST /v1/retrieval/search
+  -> resolve mode/rerank/rrf_k/recall_k (request field, else Settings)
+  -> embed the query once
+  -> vector branch: ChunkStore.search (optional distance_threshold)
+  -> hybrid? lexical branch: ChunkStore.search_lexical (plainto_tsquery, ts_rank_cd)
+  -> hybrid? fuse the two ranked id lists with reciprocal_rank_fusion(k=rrf_k)
+  -> rerank? CrossEncoderReranker.rerank(top_n=RERANK_TOP_N)   failure -> 502
+  -> 200 RetrievalResult{chunks, search_mode, rerank, candidates_evaluated,
+                         search_time_ms, low_confidence}
+```
+
+Grounded estimate:
+
+```text
+POST /v1/estimate/from-transcript
+  -> idempotency lookup (only with a key)          hit -> stored body, cached=true
+  -> reformulate: transcript -> EstimationQuery   LLM failure -> fallback source
+  -> retrieve search_query with RETRIEVAL_DISTANCE_THRESHOLD (0.65)
+       no chunks -> 200 with grounded=false, citations=[], no generation call
+  -> assemble: <source id=…> blocks, 3000-token budget, whole-chunk
+  -> generate: one grounded LLM turn              failure -> 502
+  -> validate citations against sources_of(context)
+       unknown ids -> one corrective retry -> still unknown -> 502
+  -> store under the idempotency key -> 200 EstimateFromTranscriptResponse
+```
+
 Actor-Critic-Boss:
 
 ```text
@@ -166,7 +204,9 @@ Full step-by-step detail, including state and cost semantics, is in
 | Settings | `lru_cache`d per process | rebuilt | rebuilt | per worker |
 | Prompt templates | files under `app/prompts/` | survive | survive | shared |
 | Vector store (`documents`, `chunks`) | Postgres volume | survives | survives | shared |
+| Cross-encoder weights | `hf_cache` compose volume (`HF_HOME`) | survive | survive | shared |
 | Ingestion jobs, pseudonym mappings | Postgres volume (or `var/estimator.db`) | survives | survives | shared |
+| Estimate idempotency store (`IdempotencyStore`) | process memory, 256 entries FIFO | lost | lost | forked, not shared |
 | Browser state (`st.session_state`) | Streamlit process | lost | lost on rerun | per session |
 
 Two consequences worth remembering:
@@ -174,7 +214,9 @@ Two consequences worth remembering:
 - Redis entries survive an API restart, but `docker compose down` removes the Redis
   container and, with it, the cache: the compose stack declares no volume for it.
 - Sessions and totals are per worker. Running uvicorn with more than one worker
-  breaks the conversational guarantee; the code assumes one.
+  breaks the conversational guarantee; the code assumes one. The estimate
+  idempotency store has the same property: a replay may miss by landing on a
+  different worker, and a restart means the estimate is generated again.
 
 ## Degradation matrix
 
@@ -190,19 +232,46 @@ Two consequences worth remembering:
 | Metadata LLM extractor fails | Merged heuristic metadata is kept |
 | Auxiliary model provider fails | One retry on `AUX_FALLBACK_MODEL` for calls that pass `model_override` |
 | Streaming error mid-response | `error` SSE frame; the HTTP status was already 200 |
+| Embedder or vector store unwired | `/v1/retrieval/search` returns 500 `"Embedding service is not available."`; other flows unaffected |
+| Cross-encoder cannot load or score | `rerank=true` returns 502 `"Reranking service is unavailable. Please retry later."`; `rerank=false` never loads it |
+| Nothing clears the estimate's distance floor | `/v1/estimate/from-transcript` returns 200 with `grounded=false`, `citations=[]`, `confidence_pct=0`; the generation model is never called |
+| Reformulation LLM unavailable | The query is the truncated transcript with `source="fallback"` and confidence ≤ 0.3; the request still runs |
+| Estimate generation fails | 502 `"The estimation model is unavailable. Please retry later."`; the provider error stays in the log |
 
-## Session-7 and Session-8 subsystems
+## Session-7 to Session-10 subsystems
 
-Three subsystems were added after Session 6 and are part of the running service:
+Five subsystems were added after Session 6 and are part of the running service:
 
 - **Embedding + vector store** (specs [010](../specs/010-session-7-embedding-pipeline.md),
   [012](../specs/012-session-8-pgvector-and-search.md)) —
-  `app/embedding_pipeline/`, exposed as `POST /embeddings/ingest` and
-  `POST /search`. Chunks budget components structurally, embeds them with
-  `text-embedding-3-small`, and persists each budget as a `documents` row plus
-  its embedded `chunks` in **one transaction**. Retrieval is k-NN by cosine
-  distance in SQL through an HNSW index (spec
-  [015](../specs/015-session-9-hnsw-index.md)).
+  `app/embedding_pipeline/`, exposed as `POST /embeddings/ingest`. Chunks budget
+  components structurally, embeds them with `text-embedding-3-small`, and
+  persists each budget as a `documents` row plus its embedded `chunks` in **one
+  transaction**. Retrieval is k-NN by cosine distance in SQL through an HNSW
+  index (spec [015](../specs/015-session-9-hnsw-index.md)). The Session-8
+  `POST /search` route was retired in Session 10; query-time retrieval is the
+  next bullet.
+- **Query-time retrieval pipeline** (Session 10) —
+  `app/generation/rag/retrieval/`, exposed as `POST /v1/retrieval/search`.
+  `ChunkStore.search` supplies the vector branch and `ChunkStore.search_lexical`
+  the full-text branch; hybrid mode fuses the two ranked lists with reciprocal
+  rank fusion, and an optional cross-encoder reranker
+  (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, lazily loaded) reorders the
+  recalled candidates. `SemanticRetriever` and `app/embedding_pipeline/retriever.py`
+  survive from Session 8 but no route uses them: the `/search` router was deleted
+  and `/v1/retrieval/search` calls `ChunkStore` through the pipeline instead. The
+  split is deliberate: the **corpus half** (`app/embedding_pipeline/`: chunking,
+  embedding, ingest, the `chunks` table) and the **query half**
+  (`app/generation/rag/retrieval/`) have different lifecycles. The import edge is
+  one-way — retrieval imports from `app/embedding_pipeline`, never the reverse.
+- **Grounded estimation chain** (Session 10, T0B) — `app/generation/rag/`
+  (the modules beside `retrieval/`), exposed as `POST /v1/estimate/from-transcript`
+  and four `POST /v1/estimate/stages/*` routes. It is the only consumer of
+  query-time retrieval: transcript → `EstimationQuery` → chunks → `<source>`
+  context → `GroundedEstimate` → citation check. Prompts live in
+  `app/prompts/rag_reformulation/v1/` and `app/prompts/rag_grounded_estimation/v1/`.
+  See [data-flows.md](data-flows.md) §11 and spec
+  [017](../specs/017-session-10-grounded-estimation.md).
 - **Data ingestion** (spec [011](../specs/011-session-7-data-ingestion.md)) —
   `app/ingestion/` + `app/persistence/`, exposed as
   `POST /api/v1/ingestion/runs` and `GET /api/v1/ingestion/jobs/{job_id}`.
@@ -216,7 +285,7 @@ Three subsystems were added after Session 6 and are part of the running service:
 | Stack | Driver | Used by | Session helpers |
 | --- | --- | --- | --- |
 | sync | `psycopg` | ingestion jobs and mappings (BackgroundTasks, admin operations) | `get_engine`, `get_session_factory`, `SessionLocal`, `get_session` |
-| async | `asyncpg` | `/embeddings/ingest` and `/search` (real request path) | `get_async_engine`, `get_async_session_factory` |
+| async | `asyncpg` | `/embeddings/ingest`, `/v1/retrieval/search` and the estimate chain's retrieval step (real request path) | `get_async_engine`, `get_async_session_factory` |
 
 Both read `Settings.DATABASE_URL`; `_async_database_url()` swaps the driver token
 for the async stack, so there is one configuration value. Both engines are built
@@ -230,21 +299,48 @@ vector tables. A `Vector` column on the shared base would make
 `Base.metadata.create_all()` fail on SQLite, which is how the ingestion tests
 build their temporary database. `alembic/env.py` points `target_metadata` at both.
 
-Both stacks are described in `data-flows.md` §6–8. Neither touches the
+Both stacks are described in `data-flows.md` §6–8 and §10. Neither touches the
 estimation, streaming, session or ACB paths: retrieval is its own endpoint and
-`EstimationService` does not consult the corpus yet.
+`EstimationService` does not consult the corpus. The corpus is read by the
+separate grounded-estimation chain described below, which calls retrieval rather
+than being called from it.
 
-### Known limitation: no composition between retrieval and estimation
+### Composition: retrieval → estimation
 
-That split is deliberate, but it leaves a gap. `/search` is a retrieval
-primitive: it returns chunks and cosine distances, and its consumers
-(`scripts/query_examples.py`, `examples/trace_s09.py`, the chunking lab) need
-exactly that. What does not exist is the stage that calls retrieval **in order
-to estimate** — no orchestrator assembles the retrieved budgets and hands them
-to `EstimationService`. The result is two complete halves that never meet: an
-estimate with no evidence, and evidence nobody uses.
+The loop is closed. `app/generation/rag/orchestrator.py::estimate_from_transcript`
+is the composition point: it calls the retrieval primitive in order to estimate,
+and `POST /v1/estimate/from-transcript` mounts it. Its order is
+idempotency lookup → reformulate → retrieve → assemble → generate → validate
+citations (one corrective retry) → store → return.
 
-[`arquitectura-actual.md`](../arquitectura-actual.md) is the Session-9 diagnosis
-of that gap: a real trace of a meeting transcript through `/search`, five
-concrete failures measured from it, and the modules that would close the loop.
-None of those modules are implemented, and `/search` is not scheduled to change.
+- `query_reformulator.reformulate` turns the transcript into an
+  `EstimationQuery`: a `summary` for the answer and an English `search_query`
+  for the corpus, which is English while the transcripts are usually Spanish.
+  Any LLM failure degrades to a truncated-transcript query with
+  `source="fallback"` and confidence ≤ 0.3; only a blank transcript is fatal.
+- `retrieval.pipeline.retrieve` runs the Session-10 pipeline and this caller
+  passes `Settings.RETRIEVAL_DISTANCE_THRESHOLD` (0.65), so an unrelated brief
+  returns no chunks instead of the five nearest. `/v1/retrieval/search` still
+  applies no floor of its own.
+- `context_assembler.assemble` renders the survivors as `<source>` blocks under a
+  3,000-token budget, whole-chunk, rank order preserved; `sources_of` returns the
+  ids that were actually emitted, and citations are checked against that set.
+- `estimator.generate_estimate` makes one grounded LLM turn. An empty retrieval
+  never reaches it: the chain answers `grounded=false` with no modules, no hours
+  and no citations.
+- `validation.check_citations` refuses a citation to a chunk that was not in the
+  context, with one corrective retry before `CitationValidationError`.
+
+The primitive/composition split survives untouched. `/v1/retrieval/search` still
+returns the evidence and stops, its four configurations and their measured
+precision are unchanged, and the four `POST /v1/estimate/stages/*` routes expose
+each step of the chain one at a time for inspection. What the chain deliberately
+does not add: metadata filters, query expansion and multi-index routing (forbidden
+by the Session-10 brief), auth, and a Redis-backed idempotency store
+(`app/generation/rag/idempotency.py` is process-local and dies on restart).
+
+[`arquitectura-actual.md`](../arquitectura-actual.md) remains the Session-9
+diagnosis: a real trace of a meeting transcript through the then-current
+`/search`, the five failures measured from it, and the modules that would close
+the loop. The modules it proposes are the ones above; the document is history,
+not a description of the current gap.

@@ -52,6 +52,7 @@ dependencies = [
     "langchain-experimental>=0.3.0",
     "langchain-openai>=0.2.0",
     "anthropic>=0.40",
+    "sentence-transformers>=3.0",
 ]
 
 [project.scripts]
@@ -64,6 +65,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "mutmut==3.8.1",
     "pytest>=9.1.1",
 ]
 
@@ -74,3 +76,23 @@ addopts = "-ra"
 markers = [
     "postgres: needs a real database via TEST_DATABASE_URL (skipped otherwise)",
 ]
+
+[tool.mutmut]
+# Session 10 mutation testing (scripts/mutation_s10.ps1). Mutates the retrieval
+# decision logic only: fusion, the four configurations, the reranker wrapper and
+# the lexical query. `repository.py` is mutated as a FILE, so mutants outside
+# `search_lexical` are expected and are triaged in the report.
+source_paths = [
+    "app/generation/rag/retrieval/fusion.py",
+    "app/generation/rag/retrieval/pipeline.py",
+    "app/generation/rag/retrieval/reranker.py",
+    "app/embedding_pipeline/store/repository.py",
+]
+pytest_add_cli_args_test_selection = [
+    "tests/test_rrf_fusion.py",
+    "tests/test_hybrid_retrieve.py",
+    "tests/test_reranker.py",
+    "tests/test_retrieval_route.py",
+]
+also_copy = ["alembic.ini", "alembic", "app", "data", "evals", "scripts", "examples"]
+debug = true
