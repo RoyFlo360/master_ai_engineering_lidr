@@ -82,7 +82,7 @@ streamlit_app_estimation_api.py  JSON client for /estimate
 streamlit_app_loader.py        two-tab client: typed /new-estimate + conversational /sessions — the one compose runs
 evals/                         golden-set harness: dataset.py, metrics.py, run.py (CLI), golden_dataset.json (16 cases)
 evals/stress/                  Session-6 stress harness: scenarios.py, metrics.py, run.py, analyze.py, fixtures/build_pdfs.py, REPORT.md
-tests/                         hermetic pytest suite (813 passing today + 24 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
+tests/                         hermetic pytest suite (898 passing today + 24 opt-in Postgres tests, no network, no .env); conftest.py + factories.py hold the fakes
 specs/                         spec-driven decisions, numbered 001–017; README.md explains the convention. 012–017 Implemented; 013's runtime model config still deferred
 MISSING-session{6..10}.md      gap analyses vs. the reference `ai-engineering/estimator` project, one per session (in docs/instrucctions-missing/)
 Dockerfile                     python:3.14-slim; uv sync --frozen --no-install-project; one image serves both api and streamlit
@@ -573,7 +573,7 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
 73. **The full-text config must match the generated column, and it is not a
     setting.** `FTS_REGCONFIG = "english"` lives in
     `app/embedding_pipeline/store/repository.py` and the same literal is frozen in
-    migration `0004_rag_fts`. If they diverge, Postgres still returns rows � with
+    migration `0004_rag_fts`. If they diverge, Postgres still returns rows � with
     the GIN index unused and the matching silently wrong. Making it a `Settings`
     field was tried and rejected for exactly this reason: an `.env` value could
     drift from a stored column. `tests/test_fts_regconfig.py` parses the migration
@@ -584,7 +584,7 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     would add seconds and a 120 MB download to the suite. Two tests enforce it,
     including a subprocess check on `sys.modules`. Inject a fake reranker into
     `retrieve(..., reranker=...)` instead.
-75. **`RetrievedChunk.distance` is `None` for lexical-only hits � never a sentinel.**
+75. **`RetrievedChunk.distance` is `None` for lexical-only hits � never a sentinel.**
     The reference implementation used `1.0` as a "no distance" marker, which made two
     different meanings share one field. Ours keeps them apart: `distance is None` plus
     `source == "lexical"`. Do not "normalise" it to a float; code that sorts on
@@ -594,14 +594,14 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     `502 {"detail": "Reranking service is unavailable. Please retry later."}`. Falling
     back to recall order with a 200 was considered and rejected: the caller asked for
     a configuration, and returning an un-reranked list would report a configuration
-    that never ran � a false positive the evaluation harness would record as config C
+    that never ran � a false positive the evaluation harness would record as config C
     or D. `rerank=false` paths are unaffected by a broken reranker; a test asserts
     that.
 77. **The Postgres test fixtures delete only rows they own.** Both
     `tests/test_retrieval_postgres.py` and `tests/test_rag_postgres.py` used to
     `DELETE FROM chunks` on setup and teardown. `TEST_DATABASE_URL` is commonly
     pointed at the compose database, so running `-m postgres` silently wiped the
-    ingested corpus � observed once during Session 10 and re-ingested. Cleanup is now
+    ingested corpus � observed once during Session 10 and re-ingested. Cleanup is now
     scoped by `source_path` prefix (`s10::lexical::`). Any new destructive fixture
     must do the same.
 78. **RAG is two packages and the import edge is one-way.** The corpus half
@@ -611,11 +611,20 @@ A `.env` with at least one provider key is mandatory — `Settings` raises other
     documents the boundary and `tests/test_retrieval_maintainability.py` enforces the
     direction. A cycle here means the split was abandoned by accident.
 79. **`mutmut` does not run on native Windows** (`use the WSL`, upstream issue #397),
-    and inside the Linux API container its pytest harness fails with
-    `BadTestExecutionCommandsException` while the same suite passes there. The
-    Session-10 mutation gate (`scripts/mutation_s10.ps1`, `[tool.mutmut]` in
-    `pyproject.toml`) is therefore unrun on this machine. No mutation score is
-    claimed anywhere. Run it in WSL or CI.
+    but it **does** run inside the Linux `api` container, and that is how the
+    Session-10 gate is measured (`scripts/mutation_s10.ps1`, `[tool.mutmut]` in
+    `pyproject.toml`). Result: 557 mutants, 479 killed — 86% overall, 98.6% of the
+    486 a selected test reaches, 7 triaged survivors, 71 unmapped. Three config
+    facts are load-bearing: mutmut 3.x wants `source_paths`; `also_copy` must name
+    `app`, `data`, `evals`, `scripts`, `examples` or the sandbox cannot import;
+    and the test selection is an explicit file list because the docs-link tests
+    cannot pass in a partial copy. The gate is judged on the **mapped** rate —
+    unmapped mutants are reported, never counted, because counting them would hide
+    the gap and gating on them would demand hermetic tests for pre-Session-10
+    database code. One mutmut defect to know about: it does not apply
+    default-argument mutations reliably, so mutants 3 and 4 of `pipeline.retrieve`
+    are reported as survivors even though applying them by hand fails
+    `tests/test_hybrid_retrieve.py::test_the_signature_defaults_are_the_documented_ones`.
 80. **`scripts/eval_retrieval_s10.py` must use one event loop for the whole run.**
     Calling `asyncio.run` once per configuration reuses a cached async engine whose
     pooled connections belong to the previous loop, and fails with

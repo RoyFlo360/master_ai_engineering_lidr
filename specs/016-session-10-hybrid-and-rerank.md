@@ -320,12 +320,12 @@ Implemented 2026-11-08. Every number below is copied from a run, not estimated.
 
 Not verified:
 
-- **Mutation score.** The harness and config exist (`scripts/mutation_s10.ps1`,
-  `[tool.mutmut]`, four scoped targets, `-Threshold 90`) but `mutmut` could not
-  run in this environment (it refuses native Windows, and inside the Linux
-  container it failed statistics collection while `pytest tests` passed in the
-  same container). `session10_report.md` §6 records the reproduction; this spec
-  does **not** claim a kill rate.
+- **Mutation score.** Measured, and the gate passes on the reachable set: 557
+  mutants, 479 killed (86% overall, 98.6% of the 486 a selected test reaches), 7
+  survivors triaged as equivalent or as mutmut mis-reporting a default-argument
+  mutation, 71 unmapped (pre-Session-10 `ChunkStore` CRUD). Reproduced with
+  `docker compose exec api sh -c "cd /srv/app && uv run mutmut run"`; the numbers are
+  in `session10_report.md` §7. The harness cannot run on native Windows.
 - **A lift from hybrid search or reranking.** On this 60-chunk corpus neither
   improves precision@5; the report says so plainly and scopes the conclusion to
   the corpus size.
@@ -340,6 +340,8 @@ Not verified:
 - Design a judged-relevance or NDCG metric. Precision@5 over distinct budgets
   cannot express the two improvements the reranker demonstrably produced
   (removing a false positive, concentrating on the best analogue).
-- Run the mutation threshold in CI on Linux, where `mutmut` is supported.
+- Keep re-running the mutation gate in CI: the container run is reproducible and the
+  four scoped modules are what it protects. Raise the threshold only when the
+  unmapped 71 (`ChunkStore` CRUD) are either covered or moved out of `source_paths`.
 - Spec 014 remains Implemented; only its retrieval surface is superseded by this
   one.

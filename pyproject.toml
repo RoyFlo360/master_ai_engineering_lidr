@@ -93,6 +93,11 @@ pytest_add_cli_args_test_selection = [
     "tests/test_hybrid_retrieve.py",
     "tests/test_reranker.py",
     "tests/test_retrieval_route.py",
+    "tests/test_retrieval_row_mapping.py",
+    "tests/test_lexical_search_sql.py",
+    # repository.py is mutated as a file, so the corpus-side tests are needed to
+    # map the mutants in find_document_id / persist_document_with_chunks / search.
+    "tests/test_rag_ingest_service.py",
 ]
 also_copy = ["alembic.ini", "alembic", "app", "data", "evals", "scripts", "examples"]
 debug = true

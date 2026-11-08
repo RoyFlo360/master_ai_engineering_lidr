@@ -35,17 +35,17 @@ The recipe:
 
 Three layers, three kinds of test:
 
-- **Schema introspection** (`tests/test_rag_store_models.py`) â€” no engine. Pins
-  `metadata_` â†’ `"metadata"`, the nullable `Vector(1536)`, the CASCADE FK, the
+- **Schema introspection** (`tests/test_rag_store_models.py`) — no engine. Pins
+  `metadata_` → `"metadata"`, the nullable `Vector(1536)`, the CASCADE FK, the
   unique `source_path`, the absence of a vector index, and the fact that
   `Base.metadata` carries no vector column.
 - **Fakes** (`tests/test_rag_ingest_service.py`, `tests/test_embeddings_api.py`,
-  `tests/test_search_endpoint.py`) â€” a fake store plus a fake embedder, or a fake
+  `tests/test_search_endpoint.py`) — a fake store plus a fake embedder, or a fake
   service behind `dependency_overrides`. No Postgres, no OpenAI. These cover the
   order of operations, the duplicate guard, the rollback on an embedder failure,
   the 409 body and every status mapping.
 - **Opt-in integration** (`tests/test_rag_postgres.py`, marked `postgres`, skipped
-  without `TEST_DATABASE_URL`) â€” the only place the real `vector` column, the
+  without `TEST_DATABASE_URL`) — the only place the real `vector` column, the
   unique index, `cosine_distance` and `ON DELETE CASCADE` are exercised. It uses
   `NullPool`: `asyncio.run` opens a fresh event loop per operation, and a pooled
   asyncpg connection cannot be reused across loops.
@@ -76,13 +76,30 @@ and no database, and it is the file that catches a ranking bug fastest.
 
 A targeted mutation run is an optional gate, never part of `uv run pytest -q`:
 
-- Scope it to the decision logic (fusion, the pipeline, the reranker wrapper), not
-  the whole tree; a full run on this suite takes hours.
+- Scope it to the decision logic (fusion, the pipeline, the reranker wrapper, the
+  lexical query), not the whole tree; a full run on this suite takes hours.
 - The harness is `scripts/mutation_s10.ps1` with `[tool.mutmut]` in
-  `pyproject.toml`. **`mutmut` does not run on native Windows** — use WSL or CI. It
-  is unrun on the Windows dev box, and that must be said rather than implied.
-- A survivor is a finding to triage, not a number to hide. List survivors with a
-  one-line justification each; do not lower the threshold to make a run pass.
+  `pyproject.toml`. **`mutmut` does not run on native Windows** — use WSL, or run it
+  inside the Linux `api` container, which is how the recorded numbers were produced:
+  `docker compose exec api sh -c "cd /srv/app && uv run mutmut run"`.
+- **Judge the gate on the mapped rate, and report the unmapped count beside it.**
+  A mutant no selected test reaches is a coverage finding; counting it as a kill
+  hides the gap, and gating on it demands tests for code the gate does not scope
+  (mutmut mutates a *file*, so a module like
+  `app/embedding_pipeline/store/repository.py` drags in functions the hermetic
+  suite never touches). Never report one number as if it were the other.
+- A survivor is a finding to triage, not a number to hide. For each one say
+  **killed-by-the-suite-but-mis-reported**, **equivalent** (and why the mutation is
+  unobservable), or **not worth killing**; do not lower the threshold to make a run
+  pass.
+- **Assert the SQL, not just its result, when the store cannot run hermetically.**
+  `tests/test_lexical_search_sql.py` compiles `ChunkStore.search_lexical` with the
+  PostgreSQL dialect against a fake session: no server, and an operator or label
+  change fails. Watch for substring assertions — `label(None)` compiles to
+  `AS document_id_1`, which contains `AS document_id`, so match on word boundaries.
+- **Never let a mutated default reach a real model.** An autouse fixture that stubs
+  the dependency factory keeps a `rerank=True` mutation a fast failure instead of a
+  weight download, which a mutation runner records as a timeout rather than a kill.
 
 ## The four categories
 

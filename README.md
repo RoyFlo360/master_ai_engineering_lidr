@@ -722,7 +722,7 @@ uv run pytest tests/test_llm_service.py -v
 uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost_after_the_tokens" -v
 ```
 
-Measured today: **813 passed, 24 skipped** — the skips are the opt-in Postgres
+Measured today: **898 passed, 24 skipped** — the skips are the opt-in Postgres
 tests (set `TEST_DATABASE_URL` to run them; they need a live database).
 
 The suite is hermetic: settings are built in-process (`_env_file=None`), both provider

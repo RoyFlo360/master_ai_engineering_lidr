@@ -180,10 +180,10 @@ not a second API. Each domain error carries its own status and public message:
 
 Recorded 2026-11-08; every number is copied from a run.
 
-- **Default suite** — `uv run pytest -q` → **813 passed, 24 skipped, 3 warnings**.
+- **Default suite** — `uv run pytest -q` → **898 passed, 24 skipped, 3 warnings**.
   The 24 skips are the `postgres`-marked modules.
 - **Real database** — with `TEST_DATABASE_URL` set to the compose Postgres,
-  `uv run pytest -q -m postgres` → **24 passed, 813 deselected**.
+  `uv run pytest -q -m postgres` → **24 passed, 898 deselected**.
 - **The floor, before and after** — the comment in `orchestrator._ground` records
   the failure it fixes: without a floor the vector branch always returns `top_k`
   chunks, so an unrelated brief came back `grounded=True` on five irrelevant

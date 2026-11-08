@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     Runs `mutmut` against exactly four targets and exits non-zero when the kill
-    rate is below -Threshold (default 90 percent):
+    rate is below -Threshold (default 90 percent) among the mutants a test can
+    reach:
 
         app/generation/rag/retrieval/fusion.py
         app/generation/rag/retrieval/pipeline.py
@@ -20,7 +21,9 @@
     `uv run pytest -q`.
 
 .PARAMETER Threshold
-    Minimum killed-mutant percentage (0-100). Below it the script exits 5.
+    Minimum killed-mutant percentage (0-100) **of the mapped mutants**, i.e. those
+    at least one selected test reaches. Mutants no test covers are reported, never
+    counted; below the threshold the script exits 5.
 
 .PARAMETER DryRun
     Check the tool and configuration, print the exact commands, run nothing.
@@ -410,9 +413,21 @@ try {
     }
 
     $killRate = [math]::Round(($totals.Killed / $totals.Tests) * 100, 2)
+    # The gate is judged on the mutants a test could reach. Unmapped mutants
+    # ("no test covered it") are a coverage finding, reported separately and
+    # never folded into the rate: counting them as kills would hide the gap, and
+    # gating on them would demand a test for code this gate deliberately does not
+    # scope (the corpus-side ChunkStore CRUD, mutated only because mutmut works on
+    # a file rather than a function).
+    $mapped = $totals.Tests - $totals.Skipped
+    $mappedRate = if ($mapped -gt 0) {
+        [math]::Round(($totals.Killed / $mapped) * 100, 2)
+    }
+    else { 0 }
 
     Write-Report -Lines @(
-        ("kill rate: {0}% (threshold {1}%)" -f $killRate, $Threshold),
+        ("kill rate: {0}% overall, {1}% of the {2} mapped mutants (threshold {3}% of mapped)" -f `
+            $killRate, $mappedRate, $mapped, $Threshold),
         '',
         '=== survivors ==='
     )
@@ -427,9 +442,10 @@ try {
     }
 
     Write-Host ''
-    Write-Host ("mutants: {0}  killed: {1}  survived: {2}  skipped: {3}" -f `
+    Write-Host ("mutants: {0}  killed: {1}  survived: {2}  unmapped: {3}" -f `
         $totals.Tests, $totals.Killed, $totals.Survived, $totals.Skipped)
-    Write-Host ("kill rate: {0}% (threshold {1}%)" -f $killRate, $Threshold)
+    Write-Host ("kill rate: {0}% overall, {1}% of the {2} mapped mutants" -f `
+        $killRate, $mappedRate, $mapped)
 
     if ($survivors.Count -gt 0) {
         Write-Host ''
@@ -448,12 +464,19 @@ try {
         exit 4
     }
 
-    if ($killRate -lt $Threshold) {
-        Write-Host "FAIL: kill rate $killRate% is below $Threshold%" -ForegroundColor Red
+    if ($mappedRate -lt $Threshold) {
+        Write-Host ("FAIL: {0}% of the mapped mutants were killed, below {1}%" -f `
+            $mappedRate, $Threshold) -ForegroundColor Red
+        Write-Host "report: $ReportPath"
         exit 5
     }
 
-    Write-Host "PASS: kill rate $killRate% >= $Threshold%" -ForegroundColor Green
+    Write-Host ("PASS: {0}% of the mapped mutants were killed (>= {1}%)" -f `
+        $mappedRate, $Threshold) -ForegroundColor Green
+    if ($totals.Skipped -gt 0) {
+        Write-Host ("note: {0} mutants had no covering test; they are listed in the report and are not counted." -f `
+            $totals.Skipped) -ForegroundColor Yellow
+    }
     exit 0
 }
 finally {

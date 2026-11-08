@@ -72,6 +72,24 @@ def candidate(chunk_id: int, text: str = "") -> SimpleNamespace:
     return SimpleNamespace(chunk_id=chunk_id, content=text or f"document {chunk_id}")
 
 
+class RecordingLogger:
+    """Records ``log.info`` calls so the observability contract is provable.
+
+    A fake rather than ``structlog.testing.capture_logs``: capture depends on
+    structlog's global configuration, which the application may set or cache
+    before the test runs.
+    """
+
+    def __init__(self) -> None:
+        self.infos: list[tuple[str | None, dict]] = []
+        self.errors: list[tuple[str | None, dict]] = []
+
+    def info(self, event: str | None = None, **kwargs) -> None:
+        self.infos.append((event, kwargs))
+
+    def error(self, event: str | None = None, **kwargs) -> None:
+        self.errors.append((event, kwargs))
+
 def test_rerank_sorts_descending_and_keeps_top_n() -> None:
     reranker, fake = make_reranker([0.1, 0.9, 0.5])
     candidates = [candidate(1), candidate(2), candidate(3)]
@@ -190,3 +208,172 @@ def test_importing_the_module_does_not_import_torch() -> None:
         "importing the reranker pulled a heavy runtime: "
         f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
     )
+
+
+def test_ensure_loaded_returns_a_resident_model_without_reloading() -> None:
+    """The double-checked fast path: a loaded model is returned, not replaced.
+
+    Every other test routes through ``install()``, which stubs ``_ensure_loaded``
+    out — so the fast path itself was never executed and a mutation that inverted
+    the ``is not None`` check survived.
+    """
+    sentinel = FakeCrossEncoder([])
+    reranker = CrossEncoderReranker("already-loaded")
+    reranker._model = sentinel                                        # noqa: SLF001
+
+    assert reranker._ensure_loaded() is sentinel                       # noqa: SLF001
+    assert reranker._model is sentinel                                 # noqa: SLF001
+
+
+def test_top_n_zero_yields_no_survivors_and_touches_no_model() -> None:
+    """``top_n <= 0`` is an empty result, never a Python negative-slice surprise."""
+    reranker, fake = make_reranker([0.9, 0.8])
+    candidates = [candidate(1), candidate(2)]
+
+    assert reranker.rerank("query", candidates, top_n=0) == []
+    assert reranker.rerank("query", candidates, top_n=-3) == []
+    assert fake.calls == []
+
+
+def test_model_name_exposes_the_configured_id() -> None:
+    assert CrossEncoderReranker("cross-encoder/example").model_name == "cross-encoder/example"
+
+
+def test_from_settings_reads_the_model_name_from_settings(monkeypatch) -> None:
+    """The model id comes from configuration, never from a request."""
+    import app.generation.rag.retrieval.reranker as reranker_module
+
+    monkeypatch.setattr(
+        reranker_module,
+        "get_settings",
+        lambda: SimpleNamespace(RERANKER_MODEL="cross-encoder/from-settings"),
+    )
+
+    assert CrossEncoderReranker.from_settings().model_name == "cross-encoder/from-settings"
+
+
+# --- the lazy loader, exercised for real (no torch) ------------------------
+#
+# ``install()`` replaces ``_ensure_loaded``, which is why its body had no
+# coverage: the double-checked load, the model name handed to the constructor,
+# and the load/score timings were all unobserved. These tests supply a fake
+# ``sentence_transformers`` module through ``sys.modules``, so the import inside
+# ``_ensure_loaded`` resolves to it and no torch is imported anywhere.
+
+
+def fake_sentence_transformers(monkeypatch, model_factory):
+    """Install a stub ``sentence_transformers`` whose ``CrossEncoder`` is ours."""
+    module = SimpleNamespace(CrossEncoder=model_factory)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+    return module
+
+
+def test_the_loader_builds_the_model_from_the_configured_name(monkeypatch) -> None:
+    requested: list[str] = []
+    model = FakeCrossEncoder([0.5])
+
+    def factory(name: str) -> FakeCrossEncoder:
+        requested.append(name)
+        return model
+
+    fake_sentence_transformers(monkeypatch, factory)
+    reranker = CrossEncoderReranker("cross-encoder/configured-id")
+
+    assert reranker._ensure_loaded() is model                             # noqa: SLF001
+    assert requested == ["cross-encoder/configured-id"]
+
+
+def test_the_loader_caches_the_model_in_the_instance_slot(monkeypatch) -> None:
+    """``self._model`` holds the model, so the second call takes the fast path."""
+    model = FakeCrossEncoder([0.5])
+    built = 0
+
+    def factory(name: str) -> FakeCrossEncoder:
+        nonlocal built
+        built += 1
+        return model
+
+    fake_sentence_transformers(monkeypatch, factory)
+    reranker = CrossEncoderReranker("model")
+
+    reranker._ensure_loaded()                                             # noqa: SLF001
+    reranker._ensure_loaded()                                             # noqa: SLF001
+
+    assert reranker._model is model                                       # noqa: SLF001
+    assert built == 1, "the model was loaded more than once"
+
+
+def test_a_load_failure_names_the_model_and_the_cause(monkeypatch) -> None:
+    """The raised text is the only diagnostic an operator gets from a 502."""
+
+    class BrokenCrossEncoder:
+        def __init__(self, *args, **kwargs) -> None:
+            raise OSError("weights not found")
+
+    fake_sentence_transformers(monkeypatch, BrokenCrossEncoder)
+
+    with pytest.raises(RerankerUnavailable) as raised:
+        CrossEncoderReranker("missing/model").load()
+
+    message = str(raised.value)
+    assert "missing/model" in message
+    assert "OSError" in message
+    assert "weights not found" in message
+
+
+def test_a_scoring_failure_names_the_model_the_pair_count_and_the_cause() -> None:
+    reranker, _ = make_reranker(error=RuntimeError("CUDA out of memory"))
+
+    with pytest.raises(RerankerUnavailable) as raised:
+        reranker.score("query", ["a", "b", "c"])
+
+    message = str(raised.value)
+    assert "fake-cross-encoder" in message
+    assert "3 pairs" in message
+    assert "RuntimeError" in message
+    assert "CUDA out of memory" in message
+
+
+def test_the_loader_reports_its_own_timing(monkeypatch) -> None:
+    """``load_ms`` is ``(end - start) * 1000``: a divisor or a sum is invisible live."""
+    import app.generation.rag.retrieval.reranker as reranker_module
+
+    class FakeClock:
+        def __init__(self, ticks: list[float]) -> None:
+            self.ticks = list(ticks)
+
+        def perf_counter(self) -> float:
+            return self.ticks.pop(0)
+
+    log = RecordingLogger()
+    model = FakeCrossEncoder([0.5])
+    fake_sentence_transformers(monkeypatch, lambda name: model)
+    monkeypatch.setattr(reranker_module, "time", FakeClock([10.0, 11.0]))
+    monkeypatch.setattr(reranker_module, "log", log)
+
+    CrossEncoderReranker("timed-model").load()
+
+    # A whole-second delta: int() truncation cannot hide a *1001 or /1000 slip.
+    assert log.infos == [("reranker_loaded", {"model": "timed-model", "load_ms": 1000})]
+
+
+def test_scoring_reports_its_own_timing_and_pair_count(monkeypatch) -> None:
+    import app.generation.rag.retrieval.reranker as reranker_module
+
+    class FakeClock:
+        def __init__(self, ticks: list[float]) -> None:
+            self.ticks = list(ticks)
+
+        def perf_counter(self) -> float:
+            return self.ticks.pop(0)
+
+    log = RecordingLogger()
+    reranker, _ = make_reranker([0.1, 0.2])
+    # One tick pair after the explicit ``started`` in score(). A whole-second
+    # delta so ``int()`` truncation cannot mask a scaling slip.
+    monkeypatch.setattr(reranker_module, "time", FakeClock([1.0, 2.0]))
+    monkeypatch.setattr(reranker_module, "log", log)
+
+    reranker.score("query", ["a", "b"])
+
+    assert log.infos == [("reranker_scored", {"pairs": 2, "score_ms": 1000})]

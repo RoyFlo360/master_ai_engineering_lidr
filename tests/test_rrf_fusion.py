@@ -149,3 +149,15 @@ def test_output_entries_are_int_float_tuples() -> None:
 def test_non_positive_k_raises_value_error(k: int) -> None:
     with pytest.raises(ValueError):
         reciprocal_rank_fusion([[1, 2]], k=k)
+
+
+def test_the_error_names_the_parameter() -> None:
+    """The message is the caller's only clue; a bare ``ValueError()`` is not."""
+    with pytest.raises(ValueError, match=r"^reciprocal_rank_fusion requires k > 0$"):
+        reciprocal_rank_fusion([[1, 2]], k=0)
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_small_positive_k_is_accepted(k: int) -> None:
+    """Only ``k <= 0`` is invalid — ``k = 1`` is a legal, very sharp fusion."""
+    assert reciprocal_rank_fusion([[1]], k=k) == [(1, pytest.approx(1 / (k + 1)))]

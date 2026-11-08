@@ -33,7 +33,7 @@ uv run pytest "tests/test_estimations_api.py::test_stream_reports_usage_and_cost
 ```
 
 The suite is hermetic: it reads no `.env`, reaches no provider, and needs no Redis or
-database. Measured today: **813 passed, 24 skipped** — the skips are the opt-in
+database. Measured today: **898 passed, 24 skipped** — the skips are the opt-in
 Postgres modules (the `postgres` marker).
 
 To replay the persistence tests against a real database:
@@ -450,7 +450,7 @@ uv run pytest tests/test_embedding_schemas.py tests/test_embedding_chunker.py `
   tests/test_embedding_performance.py tests/test_embedding_security.py `
   tests/test_compare_cli.py -q            # 90 passed
 
-uv run pytest -q                          # 813 passed, 24 skipped
+uv run pytest -q                          # 898 passed, 24 skipped
 
 $env:TEST_DATABASE_URL="postgresql+psycopg://estimator:estimator@localhost:5433/estimator"
 uv run pytest -q -m postgres              # 24 passed
